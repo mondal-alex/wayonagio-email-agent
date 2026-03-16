@@ -12,3 +12,10 @@ wheels/
 # Environment variables
 .env
 .env.local
+
+# Google OAuth credentials
+credentials.json
+token.json
+
+# Scanner state
+scanner_state.db

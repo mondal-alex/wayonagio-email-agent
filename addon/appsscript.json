@@ -1,0 +1,21 @@
+{
+  "timeZone": "America/Lima",
+  "dependencies": {},
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.readonly"
+  ],
+  "gmail": {
+    "name": "Wayonagio Draft Reply",
+    "logoUrl": "https://www.gstatic.com/images/branding/product/1x/gmail_512dp.png",
+    "contextualTriggers": [
+      {
+        "unconditional": {},
+        "onTriggerFunction": "buildAddOn"
+      }
+    ],
+    "openLinkUrlPrefixes": []
+  }
+}
