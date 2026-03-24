@@ -5,11 +5,8 @@ Gmail API and LLM calls are fully mocked.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import patch
 
-import pytest
-
-import wayonagio_email_agent.agent as agent_module
 from wayonagio_email_agent.agent import _process_message, manual_draft_flow
 
 
@@ -28,22 +25,6 @@ _FAKE_PARTS = {
 }
 
 _FAKE_MESSAGE = {"id": "msg-001", "threadId": "thread-001", "payload": {}}
-
-
-def _mock_gmail(
-    get_message=None,
-    extract_parts=None,
-    has_draft=False,
-    draft_result=None,
-):
-    with (
-        patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=get_message or _FAKE_MESSAGE),
-        patch("wayonagio_email_agent.agent.gmail_client.extract_message_parts", return_value=extract_parts or _FAKE_PARTS),
-        patch("wayonagio_email_agent.agent.gmail_client.thread_has_draft", return_value=has_draft),
-        patch("wayonagio_email_agent.agent.gmail_client.draft_reply", return_value=draft_result or {"id": "draft-001"}),
-    ):
-        yield
-
 
 # ---------------------------------------------------------------------------
 # manual_draft_flow
@@ -115,10 +96,12 @@ class TestProcessMessage:
             patch("wayonagio_email_agent.agent.gmail_client.extract_message_parts", return_value=_FAKE_PARTS),
             patch("wayonagio_email_agent.agent.llm.is_travel_related", return_value=(False, "en")),
             patch("wayonagio_email_agent.agent.gmail_client.draft_reply") as mock_draft,
+            patch("wayonagio_email_agent.agent.state.mark_processed") as mock_mark,
         ):
             _process_message("msg-001", dry_run=False)
 
         mock_draft.assert_not_called()
+        mock_mark.assert_called_once_with("msg-001", outcome="non_travel")
 
     def test_skips_thread_with_existing_draft(self):
         with (
@@ -133,7 +116,7 @@ class TestProcessMessage:
             _process_message("msg-001", dry_run=False)
 
         mock_draft.assert_not_called()
-        mock_mark.assert_called_once_with("msg-001")
+        mock_mark.assert_called_once_with("msg-001", outcome="thread_has_draft")
 
     def test_creates_draft_and_marks_processed(self):
         with (
@@ -149,7 +132,7 @@ class TestProcessMessage:
             _process_message("msg-001", dry_run=False)
 
         mock_draft.assert_called_once()
-        mock_mark.assert_called_once_with("msg-001")
+        mock_mark.assert_called_once_with("msg-001", outcome="drafted")
 
     def test_dry_run_does_not_create_draft(self):
         with (
@@ -163,6 +146,43 @@ class TestProcessMessage:
             patch("wayonagio_email_agent.agent.state.mark_processed") as mock_mark,
         ):
             _process_message("msg-001", dry_run=True)
+
+        mock_draft.assert_not_called()
+        mock_mark.assert_not_called()
+
+    def test_uses_subject_when_body_empty(self):
+        parts_no_body = {**_FAKE_PARTS, "body": ""}
+        with (
+            patch("wayonagio_email_agent.agent.state.is_processed", return_value=False),
+            patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=_FAKE_MESSAGE),
+            patch("wayonagio_email_agent.agent.gmail_client.extract_message_parts", return_value=parts_no_body),
+            patch("wayonagio_email_agent.agent.llm.is_travel_related", return_value=(True, "en")),
+            patch("wayonagio_email_agent.agent.gmail_client.thread_has_draft", return_value=False),
+            patch("wayonagio_email_agent.agent.llm.generate_reply", return_value="Reply") as mock_generate,
+            patch("wayonagio_email_agent.agent.gmail_client.draft_reply", return_value={"id": "d1"}),
+            patch("wayonagio_email_agent.agent.state.mark_processed"),
+        ):
+            _process_message("msg-001", dry_run=False)
+
+        mock_generate.assert_called_once_with(original=_FAKE_PARTS["subject"], language="en")
+
+    def test_draft_lookup_error_does_not_create_draft(self):
+        with (
+            patch("wayonagio_email_agent.agent.state.is_processed", return_value=False),
+            patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=_FAKE_MESSAGE),
+            patch("wayonagio_email_agent.agent.gmail_client.extract_message_parts", return_value=_FAKE_PARTS),
+            patch("wayonagio_email_agent.agent.llm.is_travel_related", return_value=(True, "it")),
+            patch(
+                "wayonagio_email_agent.agent.gmail_client.thread_has_draft",
+                side_effect=RuntimeError("draft lookup failed"),
+            ),
+            patch("wayonagio_email_agent.agent.gmail_client.draft_reply") as mock_draft,
+            patch("wayonagio_email_agent.agent.state.mark_processed") as mock_mark,
+        ):
+            try:
+                _process_message("msg-001", dry_run=False)
+            except RuntimeError:
+                pass
 
         mock_draft.assert_not_called()
         mock_mark.assert_not_called()

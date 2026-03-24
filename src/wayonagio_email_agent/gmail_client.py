@@ -160,12 +160,12 @@ def thread_has_draft(thread_id: str) -> bool:
                 return True
         return False
     except HttpError as exc:
-        logger.warning(
-            "Gmail API error checking drafts for thread %s: %s. Assuming no draft.",
+        logger.error(
+            "Gmail API error checking drafts for thread %s: %s.",
             thread_id,
             exc,
         )
-        return False
+        raise
 
 
 def draft_reply(
@@ -212,7 +212,12 @@ def _decode_body(payload: dict) -> str:
     """Extract plain-text body from a message payload."""
     if payload.get("mimeType") == "text/plain":
         data = payload.get("body", {}).get("data", "")
-        return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+        if not data:
+            return ""
+        padding = "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(f"{data}{padding}").decode(
+            "utf-8", errors="replace"
+        )
 
     for part in payload.get("parts", []):
         text = _decode_body(part)

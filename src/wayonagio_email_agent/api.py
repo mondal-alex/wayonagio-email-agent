@@ -110,7 +110,7 @@ async def draft_reply(body: DraftReplyRequest) -> DraftReplyResponse:
         logger.error("Draft flow failed for %s: %s", body.message_id, exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="Draft creation failed. Check server logs.",
         )
 
     return DraftReplyResponse(draft_id=draft.get("id", ""))

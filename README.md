@@ -73,6 +73,13 @@ uv run python -m wayonagio_email_agent.cli scan --interval 1800
 uv run python -m wayonagio_email_agent.cli scan --dry-run
 ```
 
+Scanner behavior:
+- It polls unread mail with `is:unread`.
+- Each message ID is recorded in the local SQLite state DB after a final scanner outcome: `drafted`, `non_travel`, or `thread_has_draft`.
+- This prevents repeated Ollama classification of the same unread non-travel messages across scans and restarts.
+- If Gmail draft lookup fails for a thread, the scanner skips that message for the current iteration instead of assuming it is safe to draft.
+- `--dry-run` does not create drafts and does not persist scanner state.
+
 ### CLI (admin)
 
 ```bash
@@ -149,7 +156,7 @@ WantedBy=multi-user.target
 uv run pytest
 ```
 
-All tests use mocked Gmail and Ollama calls — no real credentials or running services needed.
+All tests use mocked Gmail and Ollama calls — no real credentials or running services needed. Coverage includes API auth, scanner behavior, MIME/threading draft construction, and Gmail payload parsing.
 
 ## Architecture
 

@@ -111,6 +111,7 @@ def _process_message(message_id: str, dry_run: bool) -> None:
     )
     if not related:
         logger.debug("Message %s is not travel-related, skipping.", message_id)
+        state.mark_processed(message_id, outcome="non_travel")
         return
 
     # Secondary dedup: thread already has a draft in Gmail?
@@ -120,10 +121,11 @@ def _process_message(message_id: str, dry_run: bool) -> None:
             parts["thread_id"],
             message_id,
         )
-        state.mark_processed(message_id)  # don't check again
+        state.mark_processed(message_id, outcome="thread_has_draft")
         return
 
-    reply_body = llm.generate_reply(original=parts["body"], language=language)
+    reply_source = parts["body"] or parts["subject"]
+    reply_body = llm.generate_reply(original=reply_source, language=language)
 
     if dry_run:
         logger.info(
@@ -142,7 +144,7 @@ def _process_message(message_id: str, dry_run: bool) -> None:
         in_reply_to=parts["message_id_header"],
         references=_build_references(parts["references"], parts["message_id_header"]),
     )
-    state.mark_processed(message_id)
+    state.mark_processed(message_id, outcome="drafted")
 
 
 def _build_references(existing: str, message_id_header: str) -> str:

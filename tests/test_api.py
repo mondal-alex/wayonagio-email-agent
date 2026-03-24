@@ -89,6 +89,7 @@ class TestDraftReplyEndpoint:
                 headers=_GOOD_HEADERS,
             )
         assert resp.status_code == 500
+        assert resp.json()["detail"] == "Draft creation failed. Check server logs."
 
     def test_gmail_auth_failure_returns_503(self):
         with patch(
