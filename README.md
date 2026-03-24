@@ -192,6 +192,139 @@ uv run pytest
 
 All tests use mocked Gmail and Ollama calls — no real credentials or running services needed. Coverage includes API auth, scanner behavior, MIME/threading draft construction, and Gmail payload parsing.
 
+## Local Testing
+
+Use this flow to test Phase 1 locally with your own Gmail account. This keeps the rollout manual-first: API + Gmail Add-on, with the scanner disabled.
+
+### 1. Create Gmail OAuth credentials
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/).
+2. Create a new project, or select an existing test project.
+3. Open **APIs & Services → Library**.
+4. Search for **Gmail API** and enable it.
+5. Open **APIs & Services → OAuth consent screen**.
+6. Configure the app as an **External** app if needed.
+7. Add your own Gmail address as a **Test user** while the app is in testing mode.
+8. Open **APIs & Services → Credentials**.
+9. Click **Create Credentials → OAuth client ID**.
+10. Choose **Desktop app**.
+11. Download the client credentials JSON file.
+12. Save it in this project, for example as `credentials.json`.
+
+### 2. Install and run Ollama locally
+
+1. Install Ollama from [ollama.com](https://ollama.com/download).
+2. Start the Ollama server:
+
+```bash
+ollama serve
+```
+
+3. In a second terminal, download a model, for example:
+
+```bash
+ollama pull llama3.2
+```
+
+4. Keep note of:
+   - `OLLAMA_BASE_URL`, usually `http://localhost:11434`
+   - `OLLAMA_MODEL`, for example `llama3.2`
+
+### 3. Configure the app
+
+Copy [`.env.example`](/Users/alexalmond/ws/wayonagio-email-agent/.env.example) to `.env`:
+
+```bash
+cp .env.example .env
+```
+
+Then set:
+- `GMAIL_CREDENTIALS_PATH=credentials.json`
+- `GMAIL_TOKEN_PATH=token.json`
+- `OLLAMA_BASE_URL=http://localhost:11434`
+- `OLLAMA_MODEL=llama3.2`
+- `AUTH_BEARER_TOKEN=<your test token>`
+- `SCANNER_ENABLED=false`
+
+The scanner should stay off for Phase 1 local testing.
+
+### 4. Install dependencies and authenticate with Gmail
+
+```bash
+uv sync
+uv run python -m wayonagio_email_agent.cli auth
+```
+
+The `auth` command opens a browser, asks you to sign in with your test Gmail account, and writes `token.json`. After that, the app can read messages and create drafts in that account.
+
+### 5. Test the backend manually from the CLI
+
+List recent unread messages:
+
+```bash
+uv run python -m wayonagio_email_agent.cli list
+```
+
+Pick a `message_id`, then create a draft reply:
+
+```bash
+uv run python -m wayonagio_email_agent.cli draft-reply <message_id>
+```
+
+Open Gmail and confirm:
+- a draft was created,
+- it appears in the correct thread,
+- it was not sent automatically.
+
+### 6. Test the local API directly
+
+Start the API server:
+
+```bash
+uv run uvicorn wayonagio_email_agent.api:app --host 127.0.0.1 --port 8000
+```
+
+Then call it with `curl`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/draft-reply \
+  -H "Authorization: Bearer <AUTH_BEARER_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"message_id":"<message_id>"}'
+```
+
+If the response includes a draft ID and a draft appears in Gmail, the API path is working.
+
+### 7. Test the Gmail Add-on against your local machine
+
+Google Apps Script cannot call `localhost` directly, so expose your local API with a public HTTPS tunnel such as `ngrok` or `cloudflared`.
+
+Typical flow:
+
+1. Start the API locally on port `8000`.
+2. Start a tunnel that forwards to `http://127.0.0.1:8000`.
+3. Copy the public HTTPS URL from the tunnel.
+4. Go to [script.google.com](https://script.google.com/).
+5. Create a new Apps Script project.
+6. Copy in the contents of [`addon/Code.gs`](/Users/alexalmond/ws/wayonagio-email-agent/addon/Code.gs) and [`addon/appsscript.json`](/Users/alexalmond/ws/wayonagio-email-agent/addon/appsscript.json).
+7. In **Project Settings → Script Properties**, set:
+   - `BACKEND_URL=<your public tunnel URL>`
+   - `BEARER_TOKEN=<AUTH_BEARER_TOKEN from .env>`
+8. Deploy it as a Google Workspace Add-on.
+9. Install it for your test account.
+10. Open a Gmail message and click **Draft reply**.
+
+You should see a notification in Gmail and a new draft should appear in the thread.
+
+### 8. Recommended checks
+
+Verify these before moving beyond local testing:
+- Drafts are created, never sent.
+- Replies stay in the original Gmail thread.
+- Language detection looks reasonable for Italian, Spanish, and English emails.
+- Invalid bearer tokens are rejected.
+- `SCANNER_ENABLED=false` prevents the automatic scanner from starting.
+
 ## Architecture
 
 ```
