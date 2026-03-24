@@ -97,6 +97,11 @@ def scan(interval: int, dry_run: bool) -> None:
     """
     from wayonagio_email_agent import agent
 
+    if not agent.scanner_enabled():
+        raise click.ClickException(
+            "Scanner is disabled. Set SCANNER_ENABLED=true to enable automatic scanning."
+        )
+
     agent.scan_loop(interval=interval, dry_run=dry_run)
 
 

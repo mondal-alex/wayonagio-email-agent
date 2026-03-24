@@ -13,12 +13,19 @@ Automatic scanner loop (used by CLI `scan` subcommand):
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 from wayonagio_email_agent import gmail_client, state
 from wayonagio_email_agent.llm import ollama as llm
 
 logger = logging.getLogger(__name__)
+
+
+def scanner_enabled() -> bool:
+    """Return whether automatic scanning is enabled via configuration."""
+    value = os.environ.get("SCANNER_ENABLED", "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def manual_draft_flow(message_id: str) -> dict:

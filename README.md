@@ -40,6 +40,7 @@ cp .env.example .env
 | `OLLAMA_BASE_URL` | Ollama server URL (default: `http://localhost:11434`) |
 | `OLLAMA_MODEL` | Model name, e.g. `llama3.2` or `mistral` |
 | `AUTH_BEARER_TOKEN` | Bearer token for API authentication |
+| `SCANNER_ENABLED` | Feature flag for automatic scanner (`false` by default) |
 | `SCANNER_STATE_DB` | SQLite DB path for scanner dedup state (default: `scanner_state.db`) |
 | `LOG_LEVEL` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` (default: `INFO`) |
 
@@ -55,6 +56,11 @@ The token is refreshed automatically on subsequent runs. If the refresh token is
 
 ## Running
 
+Recommended rollout:
+- Start with the API server + Gmail Add-on only.
+- Leave `SCANNER_ENABLED=false` for the initial manual-draft rollout.
+- Enable the scanner later by setting `SCANNER_ENABLED=true` once the team is ready for automatic pre-drafting.
+
 ### API server (used by the Gmail Add-on)
 
 ```bash
@@ -64,6 +70,14 @@ uv run uvicorn wayonagio_email_agent.api:app --host 0.0.0.0
 Must be run behind a reverse proxy (Caddy or Nginx) that terminates HTTPS. See [Server deployment](#server-deployment).
 
 ### Automatic scanner
+
+The scanner is feature-flagged off by default. To enable it:
+
+```bash
+export SCANNER_ENABLED=true
+```
+
+Or set `SCANNER_ENABLED=true` in `.env`.
 
 ```bash
 # Run continuously, scanning every 30 minutes
@@ -79,6 +93,7 @@ Scanner behavior:
 - This prevents repeated Ollama classification of the same unread non-travel messages across scans and restarts.
 - If Gmail draft lookup fails for a thread, the scanner skips that message for the current iteration instead of assuming it is safe to draft.
 - `--dry-run` does not create drafts and does not persist scanner state.
+- If `SCANNER_ENABLED=false`, the `scan` command exits immediately with a clear error instead of starting.
 
 ### CLI (admin)
 
@@ -149,6 +164,25 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 ```
+
+For a phased rollout, keep the API service enabled first and run the scanner as a separate optional service later. Example scanner unit:
+
+```ini
+[Unit]
+Description=Wayonagio Email Agent Scanner
+After=network.target
+
+[Service]
+WorkingDirectory=/path/to/wayonagio-email-agent
+ExecStart=/path/to/.venv/bin/python -m wayonagio_email_agent.cli scan --interval 1800
+EnvironmentFile=/path/to/wayonagio-email-agent/.env
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Leave `SCANNER_ENABLED=false` until you want to activate automatic drafting, then change it to `true` and start the scanner service.
 
 ## Tests
 
