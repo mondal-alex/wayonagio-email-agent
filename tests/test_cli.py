@@ -30,3 +30,15 @@ class TestScanCommand:
 
         assert result.exit_code == 0
         mock_scan_loop.assert_called_once_with(interval=60, dry_run=True)
+
+    def test_scan_uses_default_interval_when_flag_not_provided(self):
+        runner = CliRunner()
+
+        with (
+            patch("wayonagio_email_agent.agent.scanner_enabled", return_value=True),
+            patch("wayonagio_email_agent.agent.scan_loop") as mock_scan_loop,
+        ):
+            result = runner.invoke(cli, ["scan"])
+
+        assert result.exit_code == 0
+        mock_scan_loop.assert_called_once_with(interval=1800, dry_run=False)

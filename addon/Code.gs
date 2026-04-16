@@ -1,8 +1,8 @@
 /**
  * Wayonagio Gmail Add-on
  *
- * Adds a "Draft reply" button when viewing an email in Gmail.
- * Clicking it calls POST /draft-reply on the backend server.
+ * Adds language-specific draft buttons when viewing an email in Gmail.
+ * Clicking a button calls POST /draft-reply on the backend server.
  *
  * Setup (run once per deployment):
  *   1. Open this project in Apps Script editor.
@@ -20,17 +20,26 @@
 function buildAddOn(e) {
   var messageId = e.gmail.messageId;
 
-  var button = CardService.newTextButton()
-    .setText("✉ Draft reply")
+  var italianButton = CardService.newTextButton()
+    .setText("🇮🇹 Draft in Italian")
     .setOnClickAction(
       CardService.newAction()
         .setFunctionName("onDraftReply")
-        .setParameters({ messageId: messageId })
+        .setParameters({ messageId: messageId, language: "it" })
+    );
+
+  var spanishButton = CardService.newTextButton()
+    .setText("🇵🇪 Draft in Spanish")
+    .setOnClickAction(
+      CardService.newAction()
+        .setFunctionName("onDraftReply")
+        .setParameters({ messageId: messageId, language: "es" })
     );
 
   var section = CardService.newCardSection()
     .setHeader("Wayonagio")
-    .addWidget(button);
+    .addWidget(italianButton)
+    .addWidget(spanishButton);
 
   return CardService.newCardBuilder()
     .setHeader(CardService.newCardHeader().setTitle("Draft reply"))
@@ -46,6 +55,7 @@ function buildAddOn(e) {
  */
 function onDraftReply(e) {
   var messageId = e.parameters.messageId;
+  var language = e.parameters.language;
   var props = PropertiesService.getScriptProperties();
   var backendUrl = props.getProperty("BACKEND_URL");
   var bearerToken = props.getProperty("BEARER_TOKEN");
@@ -65,7 +75,7 @@ function onDraftReply(e) {
     method: "post",
     contentType: "application/json",
     headers: { Authorization: "Bearer " + bearerToken },
-    payload: JSON.stringify({ message_id: messageId }),
+    payload: JSON.stringify({ message_id: messageId, language: language }),
     muteHttpExceptions: true,
   };
 
@@ -82,7 +92,7 @@ function onDraftReply(e) {
         )
         .build();
     } else {
-      Logger.log("Backend error %s: %s", code, response.getContentText());
+      Logger.log("Backend error " + code + ": " + response.getContentText());
       return CardService.newActionResponseBuilder()
         .setNotification(
           CardService.newNotification()

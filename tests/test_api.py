@@ -116,3 +116,24 @@ class TestDraftReplyEndpoint:
         finally:
             if original is not None:
                 os.environ["AUTH_BEARER_TOKEN"] = original
+
+    def test_forced_language_is_forwarded_to_agent(self):
+        with patch(
+            "wayonagio_email_agent.api.agent.manual_draft_flow",
+            return_value={"id": "draft-lang"},
+        ) as mock_flow:
+            resp = client.post(
+                "/draft-reply",
+                json={"message_id": "msg-1", "language": "it"},
+                headers=_GOOD_HEADERS,
+            )
+        assert resp.status_code == 200
+        mock_flow.assert_called_once_with("msg-1", forced_language="it")
+
+    def test_invalid_language_returns_422(self):
+        resp = client.post(
+            "/draft-reply",
+            json={"message_id": "msg-1", "language": "fr"},
+            headers=_GOOD_HEADERS,
+        )
+        assert resp.status_code == 422

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import ollama as ollama_sdk
 from dotenv import load_dotenv
@@ -72,10 +73,9 @@ def detect_language(text: str) -> str:
     messages = [{"role": "user", "content": prompt}]
     raw = _chat(messages).lower().strip()
 
-    # Accept the first recognised code found in the response
-    for code in ("it", "es", "en"):
-        if code in raw:
-            return code
+    match = re.search(r"\b(it|es|en)\b", raw)
+    if match:
+        return match.group(1)
 
     logger.warning("detect_language returned unrecognised value %r, defaulting to 'en'.", raw)
     return "en"

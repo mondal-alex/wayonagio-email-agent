@@ -17,7 +17,10 @@ A **draft-only** email response agent for a Cusco (Peru) travel agency. It conne
 3. Go to **APIs & Services** → **Credentials** → **Create Credentials** → **OAuth client ID**.
    - Application type: **Desktop app**
 4. Download the JSON file and save it as `credentials.json` in the project root.
-5. Go to **OAuth consent screen** and add the Gmail account as a test user (while in testing mode).
+5. Go to **OAuth consent screen / Data access** and add these scopes:
+   - `https://www.googleapis.com/auth/gmail.readonly`
+   - `https://www.googleapis.com/auth/gmail.compose`
+6. Go to **OAuth consent screen / Audience** and add the Gmail account as a test user (while in testing mode).
 
 ## Installation
 
@@ -44,6 +47,28 @@ cp .env.example .env
 | `SCANNER_STATE_DB` | SQLite DB path for scanner dedup state (default: `scanner_state.db`) |
 | `LOG_LEVEL` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` (default: `INFO`) |
 
+### Generate `AUTH_BEARER_TOKEN`
+
+Create a strong random token and set it in `.env`:
+
+```bash
+openssl rand -base64 32
+```
+
+Or with Python:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Then paste it into `.env`:
+
+```env
+AUTH_BEARER_TOKEN=<paste-token-here>
+```
+
+Use the same value for the Gmail Add-on Script Property `BEARER_TOKEN`.
+
 ## First-time authentication
 
 Run this **once on the server** to open a browser, complete the OAuth flow, and write `token.json`:
@@ -53,6 +78,11 @@ uv run python -m wayonagio_email_agent.cli auth
 ```
 
 The token is refreshed automatically on subsequent runs. If the refresh token is ever revoked, re-run `cli auth`.
+
+Mailbox model note:
+- The backend uses the Gmail account tied to `token.json` (`userId="me"` in Gmail API calls).
+- Drafts are created in that same mailbox.
+- For agency rollout, use a shared agency inbox/account for backend OAuth and have staff use the Add-on in that same account context.
 
 ## Running
 
@@ -107,7 +137,9 @@ uv run python -m wayonagio_email_agent.cli draft-reply <message_id>
 
 ## Gmail Add-on setup
 
-The Add-on lives in `addon/`. It adds a **"Draft reply"** button inside Gmail when viewing an email.
+The Add-on lives in `addon/`. It adds **two language-specific draft buttons** inside Gmail when viewing an email:
+- **Draft in Italian**
+- **Draft in Spanish**
 
 1. Go to [script.google.com](https://script.google.com) and create a new project.
 2. Copy the contents of `addon/Code.gs` and `addon/appsscript.json` into the project.
@@ -117,7 +149,7 @@ The Add-on lives in `addon/`. It adds a **"Draft reply"** button inside Gmail wh
 4. Click **Deploy → New Deployment** → type **Google Workspace Add-on**.
 5. Install the Add-on for your Workspace domain via the Admin console, or install it for yourself via the deployment URL.
 
-When a staff member opens an email in Gmail, the Add-on panel appears on the right. Clicking **"Draft reply"** calls `POST /draft-reply` on the backend and a draft appears in the Gmail thread.
+When a staff member opens an email in Gmail, the Add-on panel appears on the right. Clicking one of the language buttons calls `POST /draft-reply` on the backend with `message_id` and `language` (`it` or `es`), and a draft appears in the Gmail thread.
 
 ## Server deployment
 
@@ -204,12 +236,17 @@ Use this flow to test Phase 1 locally with your own Gmail account. This keeps th
 4. Search for **Gmail API** and enable it.
 5. Open **APIs & Services → OAuth consent screen**.
 6. Configure the app as an **External** app if needed.
-7. Add your own Gmail address as a **Test user** while the app is in testing mode.
-8. Open **APIs & Services → Credentials**.
-9. Click **Create Credentials → OAuth client ID**.
-10. Choose **Desktop app**.
-11. Download the client credentials JSON file.
-12. Save it in this project, for example as `credentials.json`.
+7. Keep publishing status as **Testing** (do **not** publish for local testing).
+8. Add your own Gmail address as a **Test user** while the app is in testing mode.
+   - If your account is not listed as a test user, OAuth login will fail with `Error 403: access_denied`.
+9. Open **OAuth consent screen / Data access** and add exactly these scopes:
+   - `https://www.googleapis.com/auth/gmail.readonly`
+   - `https://www.googleapis.com/auth/gmail.compose`
+9. Open **APIs & Services → Credentials**.
+10. Click **Create Credentials → OAuth client ID**.
+11. Choose **Desktop app**.
+12. Download the client credentials JSON file.
+13. Save it in this project, for example as `credentials.json`.
 
 ### 2. Install and run Ollama locally
 
@@ -232,7 +269,7 @@ ollama pull llama3.2
 
 ### 3. Configure the app
 
-Copy [`.env.example`](/Users/alexalmond/ws/wayonagio-email-agent/.env.example) to `.env`:
+Copy [`.env.example`](.env.example) to `.env`:
 
 ```bash
 cp .env.example .env
@@ -256,6 +293,13 @@ uv run python -m wayonagio_email_agent.cli auth
 ```
 
 The `auth` command opens a browser, asks you to sign in with your test Gmail account, and writes `token.json`. After that, the app can read messages and create drafts in that account.
+
+If you change scopes later, delete `token.json` and run `cli auth` again so OAuth consent is refreshed with the updated scopes.
+
+If you get `Error 403: access_denied`, verify all of the following:
+- OAuth app is still in **Testing** (not published).
+- The Gmail account you used to sign in is added under **OAuth consent screen / Audience → Test users**.
+- You are using the same project/client that generated your `credentials.json`.
 
 ### 5. Test the backend manually from the CLI
 
@@ -290,7 +334,7 @@ Then call it with `curl`:
 curl -X POST http://127.0.0.1:8000/draft-reply \
   -H "Authorization: Bearer <AUTH_BEARER_TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"message_id":"<message_id>"}'
+  -d '{"message_id":"<message_id>","language":"it"}'
 ```
 
 If the response includes a draft ID and a draft appears in Gmail, the API path is working.
@@ -306,7 +350,7 @@ Typical flow:
 3. Copy the public HTTPS URL from the tunnel.
 4. Go to [script.google.com](https://script.google.com/).
 5. Create a new Apps Script project.
-6. Copy in the contents of [`addon/Code.gs`](/Users/alexalmond/ws/wayonagio-email-agent/addon/Code.gs) and [`addon/appsscript.json`](/Users/alexalmond/ws/wayonagio-email-agent/addon/appsscript.json).
+6. Copy in the contents of [`addon/Code.gs`](addon/Code.gs) and [`addon/appsscript.json`](addon/appsscript.json).
 7. In **Project Settings → Script Properties**, set:
    - `BACKEND_URL=<your public tunnel URL>`
    - `BEARER_TOKEN=<AUTH_BEARER_TOKEN from .env>`

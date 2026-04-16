@@ -51,6 +51,13 @@ class TestDetectLanguage:
         ):
             assert detect_language("Ciao") == "it"
 
+    def test_does_not_match_language_code_inside_words(self):
+        with patch(
+            "wayonagio_email_agent.llm.ollama._chat",
+            return_value="This is limited context.",
+        ):
+            assert detect_language("Hello") == "en"
+
 
 # ---------------------------------------------------------------------------
 # generate_reply

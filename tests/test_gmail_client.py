@@ -104,6 +104,24 @@ class TestThreadHasDraft:
             with pytest.raises(HttpError):
                 gmail_client.thread_has_draft("thread-42")
 
+    def test_paginates_draft_list_until_match(self):
+        service = Mock()
+        drafts_resource = service.users.return_value.drafts.return_value
+
+        first_page = {"drafts": [{"id": "draft-a"}], "nextPageToken": "next-1"}
+        second_page = {"drafts": [{"id": "draft-b"}]}
+        drafts_resource.list.return_value.execute.side_effect = [first_page, second_page]
+
+        drafts_resource.get.side_effect = [
+            Mock(execute=Mock(return_value={"message": {"threadId": "other-thread"}})),
+            Mock(execute=Mock(return_value={"message": {"threadId": "thread-42"}})),
+        ]
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            assert gmail_client.thread_has_draft("thread-42") is True
+
+        assert drafts_resource.list.call_count == 2
+
 
 class TestMessageParsing:
     def test_decode_body_handles_missing_base64_padding(self):

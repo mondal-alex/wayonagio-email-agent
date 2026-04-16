@@ -147,17 +147,29 @@ def thread_has_draft(thread_id: str) -> bool:
     """
     try:
         service = _build_service()
-        result = service.users().drafts().list(userId="me").execute()
-        drafts = result.get("drafts", [])
-        for draft in drafts:
-            draft_detail = (
+        page_token: str | None = None
+        while True:
+            result = (
                 service.users()
                 .drafts()
-                .get(userId="me", id=draft["id"], format="metadata")
+                .list(userId="me", pageToken=page_token)
                 .execute()
             )
-            if draft_detail.get("message", {}).get("threadId") == thread_id:
-                return True
+            drafts = result.get("drafts", [])
+            for draft in drafts:
+                draft_detail = (
+                    service.users()
+                    .drafts()
+                    .get(userId="me", id=draft["id"], format="metadata")
+                    .execute()
+                )
+                if draft_detail.get("message", {}).get("threadId") == thread_id:
+                    return True
+
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+
         return False
     except HttpError as exc:
         logger.error(

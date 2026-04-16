@@ -28,7 +28,7 @@ def scanner_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def manual_draft_flow(message_id: str) -> dict:
+def manual_draft_flow(message_id: str, forced_language: str | None = None) -> dict:
     """Create a draft reply for *message_id*.
 
     Used by both the API (Add-on trigger) and the CLI `draft-reply` command.
@@ -42,8 +42,12 @@ def manual_draft_flow(message_id: str) -> dict:
     parts = gmail_client.extract_message_parts(message)
 
     body_text = parts["body"] or parts["subject"]
-    language = llm.detect_language(body_text)
-    logger.debug("Detected language: %s", language)
+    if forced_language:
+        language = forced_language
+        logger.debug("Using forced language from caller: %s", language)
+    else:
+        language = llm.detect_language(body_text)
+        logger.debug("Detected language: %s", language)
 
     reply_body = llm.generate_reply(original=body_text, language=language)
 
@@ -59,7 +63,7 @@ def manual_draft_flow(message_id: str) -> dict:
     return draft
 
 
-def scan_loop(interval: int = 30, dry_run: bool = False) -> None:
+def scan_loop(interval: int = 1800, dry_run: bool = False) -> None:
     """Run the automatic scanner indefinitely.
 
     Each iteration:

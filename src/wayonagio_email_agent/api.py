@@ -1,7 +1,7 @@
 """FastAPI application.
 
 Endpoints:
-  POST /draft-reply   { "message_id": "..." }
+  POST /draft-reply   { "message_id": "...", "language": "it|es|en" (optional) }
       Requires Authorization: Bearer <AUTH_BEARER_TOKEN>
       Calls the manual draft flow and returns the created draft ID.
 
@@ -20,6 +20,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from typing import Literal
 
 from wayonagio_email_agent import agent
 
@@ -81,6 +82,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
 # ---------------------------------------------------------------------------
 class DraftReplyRequest(BaseModel):
     message_id: str
+    language: Literal["it", "es", "en"] | None = None
 
 
 class DraftReplyResponse(BaseModel):
@@ -98,9 +100,9 @@ class DraftReplyResponse(BaseModel):
 )
 async def draft_reply(body: DraftReplyRequest) -> DraftReplyResponse:
     """Create a draft reply for the given Gmail message ID."""
-    logger.info("POST /draft-reply message_id=%s", body.message_id)
+    logger.info("POST /draft-reply message_id=%s language=%s", body.message_id, body.language)
     try:
-        draft = agent.manual_draft_flow(body.message_id)
+        draft = agent.manual_draft_flow(body.message_id, forced_language=body.language)
     except SystemExit:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

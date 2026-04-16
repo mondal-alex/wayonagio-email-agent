@@ -74,6 +74,19 @@ class TestManualDraftFlow:
         # detect_language called with subject (fallback) not empty body
         mock_detect.assert_called_once_with(_FAKE_PARTS["subject"])
 
+    def test_forced_language_skips_detection(self):
+        with (
+            patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=_FAKE_MESSAGE),
+            patch("wayonagio_email_agent.agent.gmail_client.extract_message_parts", return_value=_FAKE_PARTS),
+            patch("wayonagio_email_agent.agent.llm.detect_language") as mock_detect,
+            patch("wayonagio_email_agent.agent.llm.generate_reply", return_value="Risposta") as mock_generate,
+            patch("wayonagio_email_agent.agent.gmail_client.draft_reply", return_value={"id": "x"}),
+        ):
+            manual_draft_flow("msg-001", forced_language="es")
+
+        mock_detect.assert_not_called()
+        mock_generate.assert_called_once_with(original=_FAKE_PARTS["body"], language="es")
+
 
 # ---------------------------------------------------------------------------
 # _process_message (scanner path)
