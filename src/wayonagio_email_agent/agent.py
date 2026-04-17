@@ -4,10 +4,20 @@ Manual draft flow (used by CLI and API):
     manual_draft_flow(message_id) -> dict
     Fetch → detect language → generate reply → create draft
 
-Automatic scanner loop (used by CLI `scan` subcommand):
-    scan_loop(interval, dry_run)
-    List unread → classify → dedup (state DB + Gmail thread check) → draft
-    Failures on individual messages are isolated so the loop continues.
+Automatic scanner (two entry points over the same logic):
+    scan_once(dry_run)             one pass, returns and exits.
+                                   Use this with external schedulers
+                                   (Cloud Run Jobs + Cloud Scheduler,
+                                   cron, systemd timers).
+
+    scan_loop(interval, dry_run)   long-running ``while True`` loop.
+                                   Use this only in always-on environments
+                                   (a VM, a long-running container, etc.) —
+                                   not on Cloud Run, which scales idle
+                                   instances to zero.
+
+Both entry points share ``_process_message``: failures on individual messages
+are isolated so one bad email never stops the batch.
 """
 
 from __future__ import annotations
@@ -82,7 +92,7 @@ def scan_loop(interval: int = 1800, dry_run: bool = False) -> None:
 
     while True:
         try:
-            _scan_once(dry_run=dry_run)
+            scan_once(dry_run=dry_run)
         except Exception as exc:  # noqa: BLE001
             logger.error("Unexpected error in scan iteration: %s", exc, exc_info=True)
 
@@ -90,7 +100,13 @@ def scan_loop(interval: int = 1800, dry_run: bool = False) -> None:
         time.sleep(interval)
 
 
-def _scan_once(dry_run: bool) -> None:
+def scan_once(dry_run: bool = False) -> None:
+    """Run a single scan pass over recent unread messages and return.
+
+    This is the one-shot entry point; it's what external schedulers invoke.
+    Per-message failures are caught and logged so a single bad message never
+    aborts the pass.
+    """
     messages = gmail_client.list_messages(q="is:unread", max_results=50)
     if not messages:
         logger.debug("No unread messages found.")

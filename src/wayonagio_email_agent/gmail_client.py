@@ -141,6 +141,64 @@ def get_message(message_id: str) -> dict:
         raise
 
 
+def get_messages_metadata(
+    message_ids: list[str],
+    headers: tuple[str, ...] = ("Subject", "From"),
+) -> list[dict]:
+    """Batch-fetch header metadata for *message_ids* in a single HTTP round-trip.
+
+    This is the N+1 fix for list-style admin commands: instead of issuing one
+    ``messages.get`` request per message, we bundle every ``get`` into a single
+    multipart ``batch`` request that the Gmail API services in one hop.
+
+    Returns a list of :func:`extract_message_parts`-shaped dicts in the same
+    order as *message_ids*. Messages that fail to fetch are replaced with a
+    stub dict containing the id and an ``error`` key, so the caller can surface
+    the failure without having the whole list blow up.
+    """
+    if not message_ids:
+        return []
+
+    service = _build_service()
+    results: dict[str, dict] = {}
+    errors: dict[str, Exception] = {}
+
+    def _callback(request_id: str, response: dict | None, exception: Exception | None) -> None:
+        if exception is not None:
+            errors[request_id] = exception
+        else:
+            results[request_id] = response or {}
+
+    batch = service.new_batch_http_request(callback=_callback)
+    for mid in message_ids:
+        batch.add(
+            service.users().messages().get(
+                userId="me",
+                id=mid,
+                format="metadata",
+                metadataHeaders=list(headers),
+            ),
+            request_id=mid,
+        )
+
+    try:
+        batch.execute()
+    except HttpError as exc:
+        logger.error("Gmail API error on batch metadata fetch: %s", exc)
+        raise
+
+    output: list[dict] = []
+    for mid in message_ids:
+        if mid in errors:
+            logger.warning("Failed to fetch message %s in batch: %s", mid, errors[mid])
+            output.append({"id": mid, "error": str(errors[mid])})
+            continue
+        parts = extract_message_parts(results.get(mid, {}))
+        parts["id"] = mid
+        output.append(parts)
+    return output
+
+
 def thread_has_draft(thread_id: str) -> bool:
     """Return True if *thread_id* already contains a draft.
 

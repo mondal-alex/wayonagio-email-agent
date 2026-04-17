@@ -5,6 +5,7 @@ Usage:
   uv run python -m wayonagio_email_agent.cli list [--max N]
   uv run python -m wayonagio_email_agent.cli draft-reply <message_id>
   uv run python -m wayonagio_email_agent.cli scan [--interval N] [--dry-run]
+  uv run python -m wayonagio_email_agent.cli scan-once [--dry-run]
 """
 
 from __future__ import annotations
@@ -46,7 +47,11 @@ def auth() -> None:
 @click.option("--max", "max_results", default=10, show_default=True, help="Max emails to show.")
 @click.option("--query", "-q", default="is:unread", show_default=True, help="Gmail search query.")
 def list_emails(max_results: int, query: str) -> None:
-    """List recent emails matching a Gmail query."""
+    """List recent emails matching a Gmail query.
+
+    Uses a single batched Gmail request to fetch header metadata for all
+    matched messages, instead of one ``messages.get`` call per message.
+    """
     from wayonagio_email_agent import gmail_client
 
     messages = gmail_client.list_messages(q=query, max_results=max_results)
@@ -54,16 +59,15 @@ def list_emails(max_results: int, query: str) -> None:
         click.echo("No messages found.")
         return
 
-    for msg in messages:
-        message_id = msg["id"]
-        try:
-            full = gmail_client.get_message(message_id)
-            parts = gmail_client.extract_message_parts(full)
-            click.echo(
-                f"[{message_id}] From: {parts['from_']!r}  Subject: {parts['subject']!r}"
-            )
-        except Exception as exc:  # noqa: BLE001
-            click.echo(f"[{message_id}] Error fetching details: {exc}")
+    ids = [m["id"] for m in messages]
+    rows = gmail_client.get_messages_metadata(ids)
+    for row in rows:
+        if "error" in row:
+            click.echo(f"[{row['id']}] Error fetching details: {row['error']}")
+            continue
+        click.echo(
+            f"[{row['id']}] From: {row['from_']!r}  Subject: {row['subject']!r}"
+        )
 
 
 @cli.command(name="draft-reply")
@@ -103,6 +107,31 @@ def scan(interval: int, dry_run: bool) -> None:
         )
 
     agent.scan_loop(interval=interval, dry_run=dry_run)
+
+
+@cli.command(name="scan-once")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Classify and log what would be drafted without creating drafts.",
+)
+def scan_once(dry_run: bool) -> None:
+    """Run a single scan pass and exit.
+
+    Designed for schedulers that re-invoke the process at a fixed cadence
+    (e.g. Google Cloud Scheduler → Cloud Run Jobs, cron, systemd timers).
+    Unlike ``scan``, this command does not loop and is safe to run in
+    serverless environments that scale to zero between invocations.
+    """
+    from wayonagio_email_agent import agent
+
+    if not agent.scanner_enabled():
+        raise click.ClickException(
+            "Scanner is disabled. Set SCANNER_ENABLED=true to enable automatic scanning."
+        )
+
+    agent.scan_once(dry_run=dry_run)
 
 
 def main() -> None:

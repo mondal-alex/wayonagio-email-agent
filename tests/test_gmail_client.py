@@ -177,6 +177,116 @@ class TestThreadHasDraft:
         service.users.return_value.drafts.return_value.list.assert_not_called()
 
 
+class TestGetMessagesMetadata:
+    """Regression guards for the N+1 fix in ``cli list``.
+
+    The old code made one ``messages.get`` HTTP call per listed message.
+    The new code bundles them all into a single ``BatchHttpRequest``. These
+    tests verify (a) the batch request is built with the expected parameters
+    and (b) per-message fetch errors are surfaced without aborting the batch.
+    """
+
+    def _build_service_with_batch(self, captured: dict) -> Mock:
+        service = Mock()
+        batch = Mock()
+        added: list[tuple[Mock, str]] = []
+
+        def fake_add(request, request_id):
+            added.append((request, request_id))
+
+        batch.add.side_effect = fake_add
+        captured["batch"] = batch
+        captured["added"] = added
+        service.new_batch_http_request = Mock(return_value=batch)
+        return service
+
+    def test_returns_empty_list_when_no_ids(self):
+        with patch("wayonagio_email_agent.gmail_client._build_service") as mock_build:
+            result = gmail_client.get_messages_metadata([])
+
+        assert result == []
+        mock_build.assert_not_called()
+
+    def test_single_batch_call_for_all_ids(self):
+        captured: dict = {}
+        service = self._build_service_with_batch(captured)
+
+        def run_batch():
+            callback = service.new_batch_http_request.call_args.kwargs["callback"]
+            callback(
+                "id-1",
+                {
+                    "threadId": "t1",
+                    "payload": {
+                        "headers": [
+                            {"name": "Subject", "value": "One"},
+                            {"name": "From", "value": "a@example.com"},
+                        ]
+                    },
+                },
+                None,
+            )
+            callback(
+                "id-2",
+                {
+                    "threadId": "t2",
+                    "payload": {
+                        "headers": [
+                            {"name": "Subject", "value": "Two"},
+                            {"name": "From", "value": "b@example.com"},
+                        ]
+                    },
+                },
+                None,
+            )
+
+        captured["batch"].execute.side_effect = run_batch
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            rows = gmail_client.get_messages_metadata(["id-1", "id-2"])
+
+        captured["batch"].execute.assert_called_once()
+        assert len(captured["added"]) == 2
+        assert [rid for _, rid in captured["added"]] == ["id-1", "id-2"]
+
+        service.users().messages().get.assert_any_call(
+            userId="me", id="id-1", format="metadata", metadataHeaders=["Subject", "From"]
+        )
+
+        by_id = {r["id"]: r for r in rows}
+        assert by_id["id-1"]["subject"] == "One"
+        assert by_id["id-1"]["from_"] == "a@example.com"
+        assert by_id["id-2"]["subject"] == "Two"
+        assert by_id["id-2"]["from_"] == "b@example.com"
+
+    def test_per_message_error_is_surfaced_without_aborting(self):
+        captured: dict = {}
+        service = self._build_service_with_batch(captured)
+
+        def run_batch():
+            callback = service.new_batch_http_request.call_args.kwargs["callback"]
+            callback("id-1", None, HttpError(resp=Mock(status=404, reason="Not Found"), content=b"gone"))
+            callback(
+                "id-2",
+                {
+                    "threadId": "t2",
+                    "payload": {
+                        "headers": [{"name": "Subject", "value": "Two"}]
+                    },
+                },
+                None,
+            )
+
+        captured["batch"].execute.side_effect = run_batch
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            rows = gmail_client.get_messages_metadata(["id-1", "id-2"])
+
+        by_id = {r["id"]: r for r in rows}
+        assert "error" in by_id["id-1"]
+        assert by_id["id-2"]["subject"] == "Two"
+
+
 class TestMessageParsing:
     def test_decode_body_handles_missing_base64_padding(self):
         payload = {

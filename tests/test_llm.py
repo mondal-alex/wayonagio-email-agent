@@ -6,6 +6,8 @@ All LLM network calls are mocked via unittest.mock so no real LLM provider
 
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -13,6 +15,7 @@ import pytest
 from wayonagio_email_agent.llm.client import (
     EmptyReplyError,
     _build_kwargs,
+    _chat,
     detect_language,
     generate_reply,
     is_travel_related,
@@ -54,6 +57,21 @@ class TestDetectLanguage:
         ):
             assert detect_language("Hello") == "en"
 
+    def test_code_is_stripped_of_trailing_punctuation(self):
+        with patch(
+            "wayonagio_email_agent.llm.client._chat",
+            return_value="it.",
+        ):
+            assert detect_language("Ciao") == "it"
+
+    def test_only_parses_first_line(self):
+        """If the LLM answers on line 1 and rambles after, trust line 1."""
+        with patch(
+            "wayonagio_email_agent.llm.client._chat",
+            return_value="en\nbecause the text contains Italian and Spanish words",
+        ):
+            assert detect_language("mixed text") == "en"
+
 
 # ---------------------------------------------------------------------------
 # generate_reply
@@ -91,6 +109,55 @@ class TestGenerateReply:
         with patch("wayonagio_email_agent.llm.client._chat", return_value="   \n  \t"):
             with pytest.raises(EmptyReplyError):
                 generate_reply("Ciao", "it")
+
+    def test_forwards_generous_max_tokens_to_chat(self):
+        """Regression: ensure the token cap is not silently lowered to a value
+        that would truncate a polite multi-paragraph travel reply."""
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            generate_reply("Ciao", "it")
+
+        _, kwargs = mock_chat.call_args
+        assert kwargs["options"]["max_tokens"] >= 800
+
+
+# ---------------------------------------------------------------------------
+# _chat: truncation warning
+# ---------------------------------------------------------------------------
+
+def _fake_litellm_response(content: str, finish_reason: str | None) -> SimpleNamespace:
+    """Build a minimal object that looks like a LiteLLM ChatCompletion."""
+    choice = SimpleNamespace(
+        message=SimpleNamespace(content=content),
+        finish_reason=finish_reason,
+    )
+    return SimpleNamespace(choices=[choice])
+
+
+class TestChatTruncationWarning:
+    def test_warns_when_finish_reason_is_length(self, monkeypatch, caplog):
+        monkeypatch.setenv("LLM_MODEL", "ollama/llama3.2")
+        with caplog.at_level(logging.WARNING, logger="wayonagio_email_agent.llm.client"):
+            with patch(
+                "wayonagio_email_agent.llm.client.litellm.completion",
+                return_value=_fake_litellm_response("partial reply", "length"),
+            ):
+                _chat([{"role": "user", "content": "hi"}])
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("truncated" in m.lower() for m in messages)
+
+    def test_does_not_warn_on_normal_stop(self, monkeypatch, caplog):
+        monkeypatch.setenv("LLM_MODEL", "ollama/llama3.2")
+        with caplog.at_level(logging.WARNING, logger="wayonagio_email_agent.llm.client"):
+            with patch(
+                "wayonagio_email_agent.llm.client.litellm.completion",
+                return_value=_fake_litellm_response("complete reply", "stop"),
+            ):
+                _chat([{"role": "user", "content": "hi"}])
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("truncated" in m.lower() for m in messages)
 
 
 # ---------------------------------------------------------------------------

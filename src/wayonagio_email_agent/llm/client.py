@@ -115,10 +115,23 @@ def _build_kwargs(messages: list[dict], options: dict | None) -> dict:
 
 
 def _chat(messages: list[dict], options: dict | None = None) -> str:
-    """Send a chat request via LiteLLM and return the response content."""
+    """Send a chat request via LiteLLM and return the response content.
+
+    Logs a warning if the provider reports ``finish_reason == "length"``, i.e.
+    the reply was cut off by ``max_tokens``. That's the only way a reply gets
+    silently truncated, and it produces incomplete drafts that look unpolished
+    when the staff opens them — worth being loud about.
+    """
     try:
         response = litellm.completion(**_build_kwargs(messages, options))
-        return (response.choices[0].message.content or "").strip()
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason == "length":
+            logger.warning(
+                "LLM reply was truncated by max_tokens (finish_reason=length). "
+                "The draft may be incomplete; consider raising max_tokens."
+            )
+        return (choice.message.content or "").strip()
     except Exception as exc:
         model = _model()
         logger.error(
@@ -140,6 +153,15 @@ def detect_language(text: str) -> str:
 
     Returns a BCP-47 language code limited to "it", "es", or "en".
     Defaults to "en" if the response is unrecognised.
+
+    Parsing is deliberately strict to avoid false positives — e.g. a stray
+    "It is English" response must not be read as Italian. We check, in order:
+
+    1. The whole response is exactly one of the codes.
+    2. The *first line* is exactly one of the codes.
+    3. The first line contains one of the codes as a standalone word.
+
+    Anything else falls through to the "en" default.
     """
     prompt = (
         "Detect the language of the following text. "
@@ -150,7 +172,14 @@ def detect_language(text: str) -> str:
     messages = [{"role": "user", "content": prompt}]
     raw = _chat(messages).lower().strip()
 
-    match = re.search(r"\b(it|es|en)\b", raw)
+    if raw in _LANG_NAMES:
+        return raw
+
+    first_line = raw.splitlines()[0].strip(" \t.:;,!?\"'") if raw else ""
+    if first_line in _LANG_NAMES:
+        return first_line
+
+    match = re.search(r"\b(it|es|en)\b", first_line)
     if match:
         return match.group(1)
 
@@ -193,7 +222,7 @@ def generate_reply(original: str, language: str) -> str:
             ),
         },
     ]
-    reply = _chat(messages, options={"temperature": 0.4, "max_tokens": 350})
+    reply = _chat(messages, options={"temperature": 0.4, "max_tokens": 800})
     if not reply.strip():
         raise EmptyReplyError(
             "LLM returned an empty reply; refusing to create a blank draft."

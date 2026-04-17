@@ -16,6 +16,7 @@ from wayonagio_email_agent.agent import (
     _process_message,
     manual_draft_flow,
     scan_loop,
+    scan_once,
 )
 
 
@@ -236,7 +237,7 @@ class TestBuildReferences:
 
 class TestScanLoop:
     def test_runs_one_iteration_then_respects_keyboard_interrupt(self):
-        """scan_loop must invoke _scan_once and exit cleanly on Ctrl-C."""
+        """scan_loop must invoke scan_once and exit cleanly on Ctrl-C."""
         calls: list[bool] = []
 
         def fake_scan_once(dry_run: bool) -> None:
@@ -246,7 +247,7 @@ class TestScanLoop:
             raise KeyboardInterrupt()
 
         with (
-            patch("wayonagio_email_agent.agent._scan_once", side_effect=fake_scan_once),
+            patch("wayonagio_email_agent.agent.scan_once", side_effect=fake_scan_once),
             patch("wayonagio_email_agent.agent.time.sleep", side_effect=fake_sleep),
             pytest.raises(KeyboardInterrupt),
         ):
@@ -262,17 +263,60 @@ class TestScanLoop:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise RuntimeError("transient failure")
-            # Second call: stop the loop cleanly.
             raise KeyboardInterrupt()
 
         with (
-            patch("wayonagio_email_agent.agent._scan_once", side_effect=flaky_scan_once),
+            patch("wayonagio_email_agent.agent.scan_once", side_effect=flaky_scan_once),
             patch("wayonagio_email_agent.agent.time.sleep", return_value=None),
             pytest.raises(KeyboardInterrupt),
         ):
             scan_loop(interval=0, dry_run=False)
 
         assert call_count["n"] == 2
+
+
+class TestScanOnce:
+    def test_does_nothing_when_no_unread_messages(self):
+        with (
+            patch("wayonagio_email_agent.agent.gmail_client.list_messages", return_value=[]),
+            patch("wayonagio_email_agent.agent._process_message") as mock_process,
+        ):
+            scan_once(dry_run=False)
+
+        mock_process.assert_not_called()
+
+    def test_processes_each_unread_message(self):
+        with (
+            patch(
+                "wayonagio_email_agent.agent.gmail_client.list_messages",
+                return_value=[{"id": "a"}, {"id": "b"}],
+            ),
+            patch("wayonagio_email_agent.agent._process_message") as mock_process,
+        ):
+            scan_once(dry_run=True)
+
+        assert mock_process.call_count == 2
+        mock_process.assert_any_call("a", dry_run=True)
+        mock_process.assert_any_call("b", dry_run=True)
+
+    def test_per_message_failure_does_not_abort_pass(self):
+        def flaky(message_id: str, dry_run: bool) -> None:
+            if message_id == "a":
+                raise RuntimeError("boom")
+
+        with (
+            patch(
+                "wayonagio_email_agent.agent.gmail_client.list_messages",
+                return_value=[{"id": "a"}, {"id": "b"}],
+            ),
+            patch(
+                "wayonagio_email_agent.agent._process_message",
+                side_effect=flaky,
+            ) as mock_process,
+        ):
+            scan_once(dry_run=False)
+
+        assert mock_process.call_count == 2
 
 
 # ---------------------------------------------------------------------------

@@ -197,21 +197,41 @@ export SCANNER_ENABLED=true
 
 Or set `SCANNER_ENABLED=true` in `.env`.
 
+There are two scanner entry points, one for always-on hosts and one for schedulers:
+
 ```bash
-# Run continuously, scanning every 30 minutes
+# Long-running loop: use on a VM, a systemd service, or any
+# always-on container. NOT suitable for Cloud Run, which scales
+# idle instances to zero and will kill the loop.
 uv run python -m wayonagio_email_agent.cli scan --interval 1800
 
-# Test classification without creating any drafts
+# One-shot pass: runs a single scan and exits. Designed for
+# external schedulers (Cloud Scheduler -> Cloud Run Jobs, cron,
+# systemd timers) that own the cadence and the process lifecycle.
+uv run python -m wayonagio_email_agent.cli scan-once
+
+# Test classification without creating any drafts (works for both).
 uv run python -m wayonagio_email_agent.cli scan --dry-run
+uv run python -m wayonagio_email_agent.cli scan-once --dry-run
 ```
 
 Scanner behavior:
 - It polls unread mail with `is:unread`.
 - Each message ID is recorded in the local SQLite state DB after a final scanner outcome: `drafted`, `non_travel`, or `thread_has_draft`.
-- This prevents repeated Ollama classification of the same unread non-travel messages across scans and restarts.
+- This prevents repeated LLM classification of the same unread non-travel messages across scans and restarts.
 - If Gmail draft lookup fails for a thread, the scanner skips that message for the current iteration instead of assuming it is safe to draft.
 - `--dry-run` does not create drafts and does not persist scanner state.
-- If `SCANNER_ENABLED=false`, the `scan` command exits immediately with a clear error instead of starting.
+- If `SCANNER_ENABLED=false`, both `scan` and `scan-once` exit immediately with a clear error instead of starting.
+
+**Recommended Cloud Run pattern**
+
+Cloud Run's API service is for the Gmail Add-on's synchronous `POST /draft-reply` traffic. The scanner doesn't fit that model — so run it as a **Cloud Run Job** triggered by **Cloud Scheduler** on a fixed cron (e.g. every 30 minutes). The Job container entrypoint is simply:
+
+```
+python -m wayonagio_email_agent.cli scan-once
+```
+
+This way each scan is its own short-lived execution, Cloud Run's scale-to-zero behavior is a feature rather than a hazard, and the scheduler — not the process — owns the interval.
 
 ### CLI (admin)
 
@@ -729,7 +749,7 @@ src/wayonagio_email_agent/
   llm/client.py       # LiteLLM-backed LLM: detect_language, generate_reply, is_travel_related
   agent.py            # Orchestration: manual flow + scanner loop
   api.py              # FastAPI: POST /draft-reply
-  cli.py              # CLI: auth, list, draft-reply, scan
+  cli.py              # CLI: auth, list, draft-reply, scan, scan-once
   state.py            # SQLite dedup state for scanner
 addon/
   Code.gs             # Apps Script: Gmail contextual Add-on
