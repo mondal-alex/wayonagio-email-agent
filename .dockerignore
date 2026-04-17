@@ -1,0 +1,41 @@
+# Secrets and local state — never ship these in the image.
+.env
+.env.local
+credentials.json
+token.json
+scanner_state.db
+*.db
+
+# Git
+.git
+.gitignore
+
+# Python caches and build artifacts
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+build
+dist
+*.egg-info
+.venv
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+
+# Docs, plans, and local tooling we don't need at runtime
+README.md
+AGENTS.md
+TODO.md
+.cursor
+.codex
+.warp
+
+# Apps Script add-on is deployed separately
+addon
+
+# Tests
+tests

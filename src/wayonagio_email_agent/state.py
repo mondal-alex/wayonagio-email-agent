@@ -25,9 +25,9 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
-from dotenv import load_dotenv
-
-load_dotenv()
+# Note: `.env` is loaded by the entry points (api.py, cli.py). Library modules
+# intentionally don't call load_dotenv() so they stay cleanly importable in
+# tests and from other apps without implicit filesystem reads.
 
 logger = logging.getLogger(__name__)
 

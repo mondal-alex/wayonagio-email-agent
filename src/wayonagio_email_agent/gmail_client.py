@@ -15,7 +15,6 @@ import os
 from email.mime.text import MIMEText
 from typing import Any
 
-from dotenv import load_dotenv
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -23,7 +22,9 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-load_dotenv()
+# Note: `.env` is loaded by the entry points (api.py, cli.py). Library modules
+# intentionally don't call load_dotenv() so they stay cleanly importable in
+# tests and from other apps without implicit filesystem reads.
 
 logger = logging.getLogger(__name__)
 
@@ -141,43 +142,31 @@ def get_message(message_id: str) -> dict:
 
 
 def thread_has_draft(thread_id: str) -> bool:
-    """Return True if there is already a draft in *thread_id*.
+    """Return True if *thread_id* already contains a draft.
 
-    Used as a secondary dedup safety check before calling draft_reply().
+    Used as a secondary dedup safety check before calling draft_reply(). Checked
+    by fetching the thread and looking for any message tagged with the ``DRAFT``
+    label — this is a single API call regardless of how many drafts the mailbox
+    has, which keeps us well clear of the Gmail quota on busy shared inboxes.
     """
     try:
         service = _build_service()
-        page_token: str | None = None
-        while True:
-            result = (
-                service.users()
-                .drafts()
-                .list(userId="me", pageToken=page_token)
-                .execute()
-            )
-            drafts = result.get("drafts", [])
-            for draft in drafts:
-                draft_detail = (
-                    service.users()
-                    .drafts()
-                    .get(userId="me", id=draft["id"], format="metadata")
-                    .execute()
-                )
-                if draft_detail.get("message", {}).get("threadId") == thread_id:
-                    return True
-
-            page_token = result.get("nextPageToken")
-            if not page_token:
-                break
-
-        return False
+        thread = (
+            service.users()
+            .threads()
+            .get(userId="me", id=thread_id, format="metadata")
+            .execute()
+        )
     except HttpError as exc:
         logger.error(
-            "Gmail API error checking drafts for thread %s: %s.",
-            thread_id,
-            exc,
+            "Gmail API error checking thread %s for drafts: %s.", thread_id, exc
         )
         raise
+
+    for message in thread.get("messages", []):
+        if "DRAFT" in message.get("labelIds", []):
+            return True
+    return False
 
 
 def draft_reply(

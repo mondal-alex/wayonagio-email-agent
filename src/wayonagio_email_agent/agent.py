@@ -17,7 +17,7 @@ import os
 import time
 
 from wayonagio_email_agent import gmail_client, state
-from wayonagio_email_agent.llm import ollama as llm
+from wayonagio_email_agent.llm import client as llm
 
 logger = logging.getLogger(__name__)
 

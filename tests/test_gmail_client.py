@@ -65,28 +65,87 @@ class TestDraftReply:
         mime = message_from_bytes(base64.urlsafe_b64decode(raw))
         assert mime["Subject"] == "Re: Existing thread"
 
+    def test_non_ascii_subject_and_body_round_trip_utf8(self):
+        """Italian / Spanish / emoji content must survive the MIME round-trip.
 
-class TestThreadHasDraft:
-    def test_returns_true_when_thread_draft_exists(self):
+        Guards against someone "simplifying" MIMEText back to plain ASCII and
+        silently mangling client mail in production.
+        """
         service = Mock()
         drafts_resource = service.users.return_value.drafts.return_value
-        drafts_resource.list.return_value.execute.return_value = {
-            "drafts": [{"id": "draft-a"}, {"id": "draft-b"}]
+        drafts_resource.create.return_value.execute.return_value = {"id": "draft-u8"}
+
+        subject = "Prenotazione tour a Machu Picchu — café e reservación ✈️"
+        body = (
+            "Gentile cliente, grazie per la richiesta!\n"
+            "Le inviamo il preventivo per il tour a Machu Picchu. "
+            "Se desidera aggiungere il pranzo tradizionale (con ají), ci faccia sapere.\n"
+            "— Wayonagio"
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            gmail_client.draft_reply(
+                thread_id="thread-u8",
+                to="ciente@example.com",
+                subject=subject,
+                body=body,
+                in_reply_to="<u8@example.com>",
+                references="<u8@example.com>",
+            )
+
+        raw = drafts_resource.create.call_args.kwargs["body"]["message"]["raw"]
+        mime = message_from_bytes(base64.urlsafe_b64decode(raw))
+        # Subject decodes correctly (MIME encodes it via RFC 2047 when needed,
+        # message_from_bytes parses it back to the raw string).
+        from email.header import decode_header, make_header
+        decoded_subject = str(make_header(decode_header(mime["Subject"])))
+        assert decoded_subject == f"Re: {subject}"
+        assert mime.get_payload(decode=True).decode("utf-8") == body
+
+
+class TestThreadHasDraft:
+    def _threads_resource(self, service: Mock) -> Mock:
+        return service.users.return_value.threads.return_value
+
+    def test_returns_true_when_any_message_has_draft_label(self):
+        service = Mock()
+        self._threads_resource(service).get.return_value.execute.return_value = {
+            "messages": [
+                {"id": "m1", "labelIds": ["INBOX"]},
+                {"id": "m2", "labelIds": ["DRAFT"]},
+            ]
         }
-        drafts_resource.get.side_effect = [
-            Mock(execute=Mock(return_value={"message": {"threadId": "other-thread"}})),
-            Mock(execute=Mock(return_value={"message": {"threadId": "thread-42"}})),
-        ]
 
         with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
             assert gmail_client.thread_has_draft("thread-42") is True
 
-    def test_returns_false_when_thread_draft_missing(self):
+        self._threads_resource(service).get.assert_called_once_with(
+            userId="me", id="thread-42", format="metadata"
+        )
+
+    def test_returns_false_when_no_message_has_draft_label(self):
         service = Mock()
-        drafts_resource = service.users.return_value.drafts.return_value
-        drafts_resource.list.return_value.execute.return_value = {"drafts": [{"id": "draft-a"}]}
-        drafts_resource.get.return_value.execute.return_value = {
-            "message": {"threadId": "different-thread"}
+        self._threads_resource(service).get.return_value.execute.return_value = {
+            "messages": [
+                {"id": "m1", "labelIds": ["INBOX"]},
+                {"id": "m2", "labelIds": ["INBOX", "UNREAD"]},
+            ]
+        }
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            assert gmail_client.thread_has_draft("thread-42") is False
+
+    def test_returns_false_when_thread_has_no_messages(self):
+        service = Mock()
+        self._threads_resource(service).get.return_value.execute.return_value = {}
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            assert gmail_client.thread_has_draft("thread-42") is False
+
+    def test_returns_false_when_message_has_no_labels(self):
+        service = Mock()
+        self._threads_resource(service).get.return_value.execute.return_value = {
+            "messages": [{"id": "m1"}]
         }
 
         with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
@@ -94,8 +153,7 @@ class TestThreadHasDraft:
 
     def test_raises_when_gmail_api_check_fails(self):
         service = Mock()
-        drafts_resource = service.users.return_value.drafts.return_value
-        drafts_resource.list.return_value.execute.side_effect = HttpError(
+        self._threads_resource(service).get.return_value.execute.side_effect = HttpError(
             resp=Mock(status=500, reason="boom"),
             content=b"failed",
         )
@@ -104,23 +162,19 @@ class TestThreadHasDraft:
             with pytest.raises(HttpError):
                 gmail_client.thread_has_draft("thread-42")
 
-    def test_paginates_draft_list_until_match(self):
+    def test_is_single_api_call_regardless_of_draft_count(self):
+        """Regression guard: no mailbox-wide drafts.list scan."""
         service = Mock()
-        drafts_resource = service.users.return_value.drafts.return_value
-
-        first_page = {"drafts": [{"id": "draft-a"}], "nextPageToken": "next-1"}
-        second_page = {"drafts": [{"id": "draft-b"}]}
-        drafts_resource.list.return_value.execute.side_effect = [first_page, second_page]
-
-        drafts_resource.get.side_effect = [
-            Mock(execute=Mock(return_value={"message": {"threadId": "other-thread"}})),
-            Mock(execute=Mock(return_value={"message": {"threadId": "thread-42"}})),
-        ]
+        self._threads_resource(service).get.return_value.execute.return_value = {
+            "messages": [{"id": "m1", "labelIds": ["DRAFT"]}]
+        }
 
         with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
-            assert gmail_client.thread_has_draft("thread-42") is True
+            gmail_client.thread_has_draft("thread-42")
 
-        assert drafts_resource.list.call_count == 2
+        # threads.get() is called once; drafts.list is never called at all.
+        assert self._threads_resource(service).get.call_count == 1
+        service.users.return_value.drafts.return_value.list.assert_not_called()
 
 
 class TestMessageParsing:
