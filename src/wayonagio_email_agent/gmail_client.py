@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
+    # Read-only access to Google Drive is required for the optional knowledge
+    # base (see src/wayonagio_email_agent/kb/). It is always requested at
+    # authentication time so an operator doesn't have to re-auth when they flip
+    # KB_ENABLED on. The KB itself is still fully opt-in via KB_ENABLED.
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
 
 

@@ -241,6 +241,82 @@ uv run python -m wayonagio_email_agent.cli list
 
 # Create a draft for a specific message
 uv run python -m wayonagio_email_agent.cli draft-reply <message_id>
+
+# Rebuild the knowledge base from Drive (see Knowledge base below)
+uv run python -m wayonagio_email_agent.cli kb-ingest
+
+# Debug retrieval for a query
+uv run python -m wayonagio_email_agent.cli kb-search "how much is Machu Picchu?"
+```
+
+### Knowledge base (optional)
+
+The knowledge base is an opt-in RAG feature that reads content from Google Drive and uses it to make drafts more accurate. It is fully off by default (`KB_ENABLED=false`); the agent behaves exactly as before when it is disabled. Point `KB_RAG_FOLDER_IDS` at whatever Drive folder IDs (or share URLs) the agency already uses — no folder renaming required.
+
+The ingest pipeline walks every configured folder (recursively, by default), extracts text from Google Docs, PDFs, plain text, and Markdown, chunks and embeds it, and publishes a single artifact:
+
+- `kb_index.sqlite` — vector index with embeddings (default model: `gemini/text-embedding-004`, dimension 768).
+
+Artifacts land in `KB_GCS_URI` (Cloud Run) or `KB_LOCAL_DIR` (dev / single-host). The API and scanner read them at cold start; any failure — missing artifact, KB disabled, embedding error — falls back silently to the base prompt so KB outages never block drafting.
+
+Environment variables (see [.env.example](.env.example) for the full list):
+
+| Variable | Description |
+|---|---|
+| `KB_ENABLED` | Feature flag. Leave `false` until the index has been ingested. |
+| `KB_RAG_FOLDER_IDS` | Required when `KB_ENABLED=true`. Comma-separated Drive folder IDs or share URLs. |
+| `KB_RAG_RECURSIVE` | Walk subfolders (default `true`). |
+| `KB_EMBEDDING_MODEL` | LiteLLM model string for embeddings (default `gemini/text-embedding-004`). |
+| `KB_GCS_URI` | Production: `gs://bucket[/prefix]`. The index lives here. |
+| `KB_LOCAL_DIR` | Dev fallback when `KB_GCS_URI` is unset (default `./kb_artifacts`). |
+| `KB_TOP_K` | Chunks to retrieve per email (default `4`). |
+
+**Drive OAuth scope.** The agent authentication already requests `drive.readonly` alongside the two Gmail scopes, so no re-auth is needed when you flip `KB_ENABLED` on; `cli auth` asks for all three up front. If you authenticated before this feature existed, delete `token.json` and re-run `cli auth` once.
+
+**Cloud Run deployment.** The ingest pipeline runs as a **Cloud Run Job** triggered by **Cloud Scheduler** on whatever cadence fits your content's churn rate (daily is usually plenty). The Job container entrypoint is `python -m wayonagio_email_agent.cli kb-ingest`. Grant its service account:
+
+- `roles/storage.objectAdmin` on the bucket behind `KB_GCS_URI`.
+- `roles/secretmanager.secretAccessor` on the same secrets as the API (Gmail/Drive token, Gemini key, bearer token — reuse the existing service account if you prefer).
+
+The API service additionally needs `roles/storage.objectViewer` on that bucket so its cold-start artifact download works. Give the service account access to the artifact bucket and Cloud Run will transparently download `kb_index.sqlite` on the first draft after a cold start.
+
+Example one-off deploy commands:
+
+```bash
+# Build the ingest Job (reuses the same image as the API)
+IMG="us-central1-docker.pkg.dev/$(gcloud config get-value project)/wayonagio/email-agent:latest"
+
+gcloud run jobs create wayonagio-kb-ingest \
+  --image="$IMG" \
+  --region=us-central1 \
+  --service-account="wayonagio-run@$(gcloud config get-value project).iam.gserviceaccount.com" \
+  --command="python" \
+  --args="-m,wayonagio_email_agent.cli,kb-ingest" \
+  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,KB_ENABLED=true,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids>,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json \
+  --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest,GEMINI_API_KEY=gemini-api-key:latest \
+  --set-secrets=/secrets/credentials.json=gmail-credentials:latest,/secrets/token.json=gmail-token:latest
+
+# Schedule it (daily at 04:15 UTC)
+gcloud scheduler jobs create http wayonagio-kb-ingest-daily \
+  --location=us-central1 \
+  --schedule="15 4 * * *" \
+  --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$(gcloud config get-value project)/jobs/wayonagio-kb-ingest:run" \
+  --http-method=POST \
+  --oauth-service-account-email="wayonagio-run@$(gcloud config get-value project).iam.gserviceaccount.com"
+```
+
+After the first successful ingest, flip the API service to pick up the KB:
+
+```bash
+gcloud run services update wayonagio-email-agent \
+  --region=us-central1 \
+  --update-env-vars=KB_ENABLED=true,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004
+```
+
+You can sanity-check retrieval without ever sending an email:
+
+```bash
+uv run python -m wayonagio_email_agent.cli kb-search "inca trail permit availability"
 ```
 
 ## Gmail Add-on setup
@@ -745,12 +821,22 @@ Verify these before moving beyond local testing:
 
 ```
 src/wayonagio_email_agent/
-  gmail_client.py     # Gmail API: OAuth, list/get/draft/dedup
+  gmail_client.py     # Gmail + Drive API: OAuth, list/get/draft/dedup
   llm/client.py       # LiteLLM-backed LLM: detect_language, generate_reply, is_travel_related
   agent.py            # Orchestration: manual flow + scanner loop
   api.py              # FastAPI: POST /draft-reply
-  cli.py              # CLI: auth, list, draft-reply, scan, scan-once
+  cli.py              # CLI: auth, list, draft-reply, scan, scan-once, kb-ingest, kb-search
   state.py            # SQLite dedup state for scanner
+  kb/                 # Knowledge base (optional, KB_ENABLED)
+    config.py         # Env-driven KB config + Drive URL parsing
+    drive.py          # Drive wrapper: list folders, export Docs, download files
+    extract.py        # MIME-dispatched text extraction (PDF / Docs / txt / md)
+    chunk.py          # Paragraph-aware chunker with overlap
+    embed.py          # LiteLLM-backed batched embeddings
+    store.py          # SQLite vector store + numpy cosine top-k
+    artifact.py       # GCS + local artifact I/O
+    retrieve.py       # Runtime: retrieve() for llm/client
+    ingest.py         # End-to-end ingest pipeline (kb-ingest)
 addon/
   Code.gs             # Apps Script: Gmail contextual Add-on
   appsscript.json
@@ -759,6 +845,7 @@ tests/
   test_llm.py
   test_agent.py
   test_api.py
+  test_kb_*.py
 ```
 
 See `AGENTS.md` for developer guidance.

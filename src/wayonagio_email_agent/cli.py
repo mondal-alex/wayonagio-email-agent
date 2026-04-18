@@ -6,6 +6,8 @@ Usage:
   uv run python -m wayonagio_email_agent.cli draft-reply <message_id>
   uv run python -m wayonagio_email_agent.cli scan [--interval N] [--dry-run]
   uv run python -m wayonagio_email_agent.cli scan-once [--dry-run]
+  uv run python -m wayonagio_email_agent.cli kb-ingest
+  uv run python -m wayonagio_email_agent.cli kb-search <query> [--top-k N]
 """
 
 from __future__ import annotations
@@ -132,6 +134,48 @@ def scan_once(dry_run: bool) -> None:
         )
 
     agent.scan_once(dry_run=dry_run)
+
+
+@cli.command(name="kb-ingest")
+def kb_ingest() -> None:
+    """Build and publish the KB vector index.
+
+    Reads every configured RAG Drive folder, extracts text, chunks it, embeds
+    the chunks, and writes ``kb_index.sqlite`` to GCS (``KB_GCS_URI``) or the
+    local artifact dir (``KB_LOCAL_DIR``). Intended to run as a Cloud Run Job
+    triggered by Cloud Scheduler.
+    """
+    from wayonagio_email_agent.kb import ingest
+
+    result = ingest.run()
+    click.echo(
+        f"KB ingest complete: rag_sources={result.rag_source_count}, "
+        f"chunks={result.rag_chunk_count}, dim={result.embedding_dim}.\n"
+        f"  index -> {result.index_destination}"
+    )
+
+
+@cli.command(name="kb-search")
+@click.argument("query")
+@click.option("--top-k", default=4, show_default=True, help="How many chunks to return.")
+def kb_search(query: str, top_k: int) -> None:
+    """Debug retrieval: print the top chunks for QUERY.
+
+    Useful for sanity-checking a fresh ingest before a draft goes out.
+    """
+    from wayonagio_email_agent.kb import retrieve as kb_retrieve
+
+    hits = kb_retrieve.retrieve(query, top_k=top_k)
+    if not hits:
+        click.echo("No results. Is KB_ENABLED=true and has kb-ingest been run?")
+        return
+
+    for i, hit in enumerate(hits, 1):
+        click.echo(f"[{i}] score={hit.score:.3f}  source={hit.source_path}")
+        preview = hit.text.replace("\n", " ")
+        if len(preview) > 240:
+            preview = preview[:237] + "..."
+        click.echo(f"    {preview}")
 
 
 def main() -> None:

@@ -201,26 +201,47 @@ def generate_reply(original: str, language: str) -> str:
     *language* should be one of "it", "es", "en". Raises :class:`EmptyReplyError`
     if the LLM returns an empty or whitespace-only string so the caller can
     decline to draft rather than silently creating a blank email.
+
+    When the optional knowledge base is enabled (``KB_ENABLED=true`` and an
+    index is available), the top-k retrieved chunks are inserted as a
+    clearly-delimited ``REFERENCE MATERIAL`` section. If retrieval fails, we
+    silently fall back to the base prompt rather than refuse to draft.
     """
+    from wayonagio_email_agent.kb import retrieve as kb_retrieve
+
     lang_name = _LANG_NAMES.get(language, "English")
+
+    try:
+        hits = kb_retrieve.retrieve(original)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KB retrieval unavailable: %s", exc)
+        hits = []
+    reference_block = kb_retrieve.format_reference_block(hits) if hits else ""
+
+    user_content = (
+        f"LANGUAGE REQUIREMENT: Write your entire reply in {lang_name}. "
+        f"Do not use Spanish, English, or any language other than {lang_name} "
+        "(unless that language is the one requested). "
+        "Even if the original email is in a different language, your reply "
+        f"must be in {lang_name}.\n\n"
+        "TASK: Write a professional, concise reply from our Cusco travel agency "
+        "to the client email below. Do not add a subject line. Do not include "
+        "any meta commentary or translations — output only the reply body.\n\n"
+    )
+    if reference_block:
+        user_content += (
+            "USE OF REFERENCE MATERIAL: When the client asks about specific "
+            "facts — prices, inclusions, durations, policies — only use facts "
+            "that appear in the reference material below. If a fact is not in "
+            "the reference material, do not invent it; ask the client for "
+            "clarification or offer to follow up.\n\n"
+            f"{reference_block}\n\n"
+        )
+    user_content += f"CLIENT EMAIL:\n{original}\n\nYOUR REPLY (in {lang_name}):"
 
     messages = [
         {"role": "system", "content": _CONTEXT},
-        {
-            "role": "user",
-            "content": (
-                f"LANGUAGE REQUIREMENT: Write your entire reply in {lang_name}. "
-                f"Do not use Spanish, English, or any language other than {lang_name} "
-                "(unless that language is the one requested). "
-                "Even if the original email is in a different language, your reply "
-                f"must be in {lang_name}.\n\n"
-                "TASK: Write a professional, concise reply from our Cusco travel agency "
-                "to the client email below. Do not add a subject line. Do not include "
-                "any meta commentary or translations — output only the reply body.\n\n"
-                f"CLIENT EMAIL:\n{original}\n\n"
-                f"YOUR REPLY (in {lang_name}):"
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
     reply = _chat(messages, options={"temperature": 0.4, "max_tokens": 800})
     if not reply.strip():

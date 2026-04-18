@@ -85,3 +85,61 @@ class TestScanOnceCommand:
 
         assert result.exit_code == 0
         mock_scan_once.assert_called_once_with(dry_run=True)
+
+
+class TestKBIngestCommand:
+    def test_invokes_ingest_run(self):
+        runner = CliRunner()
+
+        fake_result = type(
+            "R",
+            (),
+            dict(
+                rag_source_count=3,
+                rag_chunk_count=14,
+                embedding_dim=768,
+                index_destination="/tmp/kb_index.sqlite",
+            ),
+        )()
+
+        with patch("wayonagio_email_agent.kb.ingest.run", return_value=fake_result) as mock_run:
+            result = runner.invoke(cli, ["kb-ingest"])
+
+        assert result.exit_code == 0, result.output
+        mock_run.assert_called_once_with()
+        assert "rag_sources=3" in result.output
+        assert "/tmp/kb_index.sqlite" in result.output
+
+
+class TestKBSearchCommand:
+    def test_prints_results_when_hits_exist(self):
+        runner = CliRunner()
+
+        from wayonagio_email_agent.kb.store import ScoredChunk
+
+        hits = [
+            ScoredChunk(
+                text="Machu Picchu tour details.",
+                source_id="sid",
+                source_name="a.md",
+                source_path="root / a.md",
+                chunk_index=0,
+                score=0.87,
+            )
+        ]
+        with patch("wayonagio_email_agent.kb.retrieve.retrieve", return_value=hits) as mock_retrieve:
+            result = runner.invoke(cli, ["kb-search", "machu picchu", "--top-k", "3"])
+
+        assert result.exit_code == 0, result.output
+        mock_retrieve.assert_called_once_with("machu picchu", top_k=3)
+        assert "0.870" in result.output
+        assert "root / a.md" in result.output
+
+    def test_prints_hint_when_no_results(self):
+        runner = CliRunner()
+
+        with patch("wayonagio_email_agent.kb.retrieve.retrieve", return_value=[]):
+            result = runner.invoke(cli, ["kb-search", "nothing", "--top-k", "3"])
+
+        assert result.exit_code == 0, result.output
+        assert "KB_ENABLED" in result.output

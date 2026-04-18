@@ -122,6 +122,68 @@ class TestGenerateReply:
 
 
 # ---------------------------------------------------------------------------
+# KB augmentation (optional, gated by KB_ENABLED)
+# ---------------------------------------------------------------------------
+
+class TestGenerateReplyKBIntegration:
+    """Wire-up tests: the KB must augment the prompt when enabled, and never
+    block drafting when KB calls fail."""
+
+    def test_prompt_unchanged_when_kb_disabled(self, monkeypatch):
+        monkeypatch.setenv("KB_ENABLED", "false")
+        from wayonagio_email_agent.kb import retrieve as kb_retrieve
+
+        kb_retrieve.reset_cache()
+
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            generate_reply("Hello", "en")
+
+        messages = mock_chat.call_args[0][0]
+        user = next(m for m in messages if m["role"] == "user")["content"]
+        assert "REFERENCE MATERIAL" not in user
+
+    def test_retrieved_chunks_are_injected_into_user_prompt(self, monkeypatch):
+        from wayonagio_email_agent.kb import retrieve as kb_retrieve
+        from wayonagio_email_agent.kb.store import ScoredChunk
+
+        chunk = ScoredChunk(
+            text="Machu Picchu tour costs $250/person.",
+            source_id="sid",
+            source_name="MachuPicchu.md",
+            source_path="Tours / MachuPicchu.md",
+            chunk_index=0,
+            score=0.93,
+        )
+        monkeypatch.setattr(kb_retrieve, "retrieve", lambda q, top_k=None: [chunk])
+
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            generate_reply("How much is Machu Picchu?", "en")
+
+        messages = mock_chat.call_args[0][0]
+        user = next(m for m in messages if m["role"] == "user")["content"]
+        assert "REFERENCE MATERIAL" in user
+        assert "Tours / MachuPicchu.md" in user
+        assert "Machu Picchu tour costs $250/person." in user
+        assert "USE OF REFERENCE MATERIAL" in user
+
+    def test_kb_failures_do_not_block_drafting(self, monkeypatch):
+        from wayonagio_email_agent.kb import retrieve as kb_retrieve
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("KB down")
+
+        monkeypatch.setattr(kb_retrieve, "retrieve", boom)
+
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            result = generate_reply("Hello", "en")
+
+        assert result == "reply"
+
+
+# ---------------------------------------------------------------------------
 # _chat: truncation warning
 # ---------------------------------------------------------------------------
 
