@@ -20,6 +20,9 @@ token.json
 # Scanner state
 scanner_state.db
 
+# VSCode Settings
+.vscode
+
 # clasp (Apps Script CLI) project link
 .clasp.json
 addon/.clasp.json
