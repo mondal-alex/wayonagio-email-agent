@@ -47,15 +47,10 @@ def run(*, config: KBConfig | None = None, service: Any | None = None) -> Ingest
     the Drive wrapper builds a real service from the existing OAuth token.
     """
     cfg = config or load_config()
-    if not cfg.enabled:
-        raise RuntimeError(
-            "KB ingest was invoked but KB_ENABLED is not true. Refusing to publish "
-            "artifacts that will be ignored at runtime."
-        )
     if not cfg.rag_folder_ids:
-        raise RuntimeError(
-            "KB ingest needs KB_RAG_FOLDER_IDS to be set."
-        )
+        # Defensive: load_config() already enforces this, but a caller passing
+        # a hand-built KBConfig (e.g. tests) could bypass that check.
+        raise RuntimeError("KB ingest needs KB_RAG_FOLDER_IDS to be set.")
 
     with tempfile.TemporaryDirectory(prefix="kb_ingest_") as tmp:
         tmp_path = Path(tmp)
@@ -67,13 +62,22 @@ def run(*, config: KBConfig | None = None, service: Any | None = None) -> Ingest
         # extract, folder was emptied), refuse to publish an empty index. An
         # empty index would silently replace a previously-working one at
         # runtime and degrade retrieval to nothing without anyone noticing.
-        if rag_sources == 0:
+        #
+        # We check sources, chunks, AND embeddings independently because a file
+        # whose extracted text passes ``text.strip()`` can still produce zero
+        # chunks (whitespace-only paragraphs, pathological splits), and a
+        # chunker with non-empty output can theoretically return an empty
+        # embedding matrix from a misbehaving provider. Any of the three being
+        # empty means the resulting index is unusable for retrieval.
+        if rag_sources == 0 or not chunks or embeddings.size == 0:
             raise RuntimeError(
-                "KB ingest resolved zero usable RAG sources from "
-                f"{len(cfg.rag_folder_ids)} configured folder(s). Refusing to "
-                "publish an empty index that would overwrite the previous one. "
-                "Check the ingest logs for per-file skip warnings, verify "
-                "folder IDs, and confirm the service account has drive.readonly."
+                f"KB ingest produced an unusable index from "
+                f"{len(cfg.rag_folder_ids)} configured folder(s) "
+                f"(sources={rag_sources}, chunks={len(chunks)}, "
+                f"embedding_size={embeddings.size}). Refusing to publish an "
+                "empty index that would overwrite the previous one. Check the "
+                "ingest logs for per-file skip warnings, verify folder IDs, "
+                "and confirm the service account has drive.readonly."
             )
 
         index_local = tmp_path / cfg.index_filename

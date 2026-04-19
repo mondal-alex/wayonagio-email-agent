@@ -16,7 +16,8 @@ import hmac
 import logging
 import os
 import traceback
-from typing import Literal
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Literal
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -27,6 +28,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from wayonagio_email_agent import agent
+from wayonagio_email_agent.exemplars import loader as exemplar_loader
+from wayonagio_email_agent.kb.config import KBConfigError
+from wayonagio_email_agent.kb.retrieve import KBUnavailableError
+from wayonagio_email_agent.llm.client import EmptyReplyError
 
 load_dotenv()
 
@@ -101,11 +106,39 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 # ---------------------------------------------------------------------------
+# Lifespan: warm up the exemplar cache before accepting traffic
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Pre-populate the exemplar cache during container startup.
+
+    Without this, the first user request after a Cloud Run cold start
+    would pay the Drive read latency itself (~1s parallelized for ~30
+    Docs). Running the load here moves that cost into the container boot
+    window, which Cloud Run hides behind its startup probe (default 240s
+    tolerance — well above our worst case).
+
+    ``exemplar_loader.get_all_exemplars`` is contracted to never raise, so
+    a Drive outage at startup cannot block the app from coming up. In
+    that scenario the loader caches ``[]`` for the lifetime of the
+    process and drafts simply omit the EXAMPLE RESPONSES block — exactly
+    the same graceful degradation as the runtime path.
+    """
+    exemplar_loader.get_all_exemplars()
+    yield
+
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-app = FastAPI(title="Wayonagio Email Agent")
-app.add_middleware(_SecurityHeadersMiddleware)
+app = FastAPI(title="Wayonagio Email Agent", lifespan=_lifespan)
+# Middleware ordering matters: ``add_middleware`` is LIFO, so the LAST one
+# added runs FIRST (outermost). _SecurityHeadersMiddleware must be the
+# outermost so it still attaches the headers to short-circuit responses
+# (e.g. a 413 from _BodySizeLimitMiddleware) — otherwise an attacker who
+# triggers any middleware-level rejection bypasses HSTS / X-Frame-Options.
 app.add_middleware(_BodySizeLimitMiddleware)
+app.add_middleware(_SecurityHeadersMiddleware)
 
 _bearer_scheme = HTTPBearer()
 
@@ -185,8 +218,17 @@ async def healthz() -> HealthResponse:
     response_model=DraftReplyResponse,
     dependencies=[Depends(_verify_token)],
 )
-async def draft_reply(body: DraftReplyRequest) -> DraftReplyResponse:
-    """Create a draft reply for the given Gmail message ID."""
+def draft_reply(body: DraftReplyRequest) -> DraftReplyResponse:
+    """Create a draft reply for the given Gmail message ID.
+
+    Defined with ``def`` (not ``async def``) on purpose: ``manual_draft_flow``
+    is a synchronous chain of blocking I/O — Gmail HTTPS round-trips, an LLM
+    completion call (multi-second), SQLite reads against the KB index, and
+    optionally a GCS download. FastAPI runs sync handlers in its threadpool,
+    so concurrent requests don't serialize on a single event loop. Marking
+    this ``async`` would block every other request (including ``/healthz``)
+    for the entire duration of one draft.
+    """
     logger.info("POST /draft-reply message_id=%s language=%s", body.message_id, body.language)
     try:
         draft = agent.manual_draft_flow(body.message_id, forced_language=body.language)
@@ -194,6 +236,29 @@ async def draft_reply(body: DraftReplyRequest) -> DraftReplyResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Gmail authentication failed. Run `cli auth` on the server.",
+        )
+    except (KBUnavailableError, KBConfigError) as exc:
+        # The KB is a hard dependency: every draft must be grounded in agency
+        # content. When the index is missing, corrupt, or misconfigured we
+        # surface a 503 with an actionable message so the Add-on user knows
+        # to escalate to the operator rather than refresh blindly.
+        logger.error(
+            "KB unavailable for %s: %s", body.message_id, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Knowledge base unavailable. Ask the operator to run kb-ingest.",
+        )
+    except EmptyReplyError as exc:
+        # The LLM returned nothing usable (rate limit, content filter, broken
+        # provider). 502 reflects that the upstream provider, not us, failed.
+        # The Add-on shows the detail so the user can simply retry.
+        logger.error(
+            "LLM returned empty reply for %s: %s", body.message_id, exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM returned an empty reply. Please retry.",
         )
     except Exception as exc:
         logger.error("Draft flow failed for %s: %s", body.message_id, exc, exc_info=True)

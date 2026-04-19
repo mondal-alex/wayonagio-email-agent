@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import gc
+import warnings
+
 import numpy as np
 
 from wayonagio_email_agent.kb.chunk import Chunk
@@ -102,6 +105,36 @@ def test_top_k_handles_zero_query_vector(tmp_path):
     )
     loaded = load_index(index_path)
     assert loaded.top_k(np.array([0.0, 0.0]), k=1) == []
+
+
+def test_write_and_load_do_not_leak_sqlite_connections(tmp_path):
+    """Regression: ``sqlite3.Connection.__exit__`` commits but does NOT close.
+    Without ``contextlib.closing`` around ``sqlite3.connect``, every
+    ``write_index`` / ``load_index`` call leaks a file descriptor and
+    eventually surfaces as ``ResourceWarning: unclosed database`` (which
+    blows up the test suite under ``pytest -W error``).
+    """
+    chunks = [_chunk(0, "hello")]
+    embeddings = np.array([[1.0, 0.0]], dtype=np.float32)
+
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        for i in range(20):
+            index_path = tmp_path / f"kb_index_{i}.sqlite"
+            write_index(
+                index_path,
+                chunks,
+                embeddings,
+                embedding_model="test/model",
+                source_file_count=1,
+            )
+            load_index(index_path)
+        gc.collect()
+
+    leaks = [w for w in recorded if issubclass(w.category, ResourceWarning)]
+    assert leaks == [], (
+        f"kb/store leaked sqlite connections: {[str(w.message) for w in leaks]}"
+    )
 
 
 def test_write_replaces_existing_file(tmp_path):

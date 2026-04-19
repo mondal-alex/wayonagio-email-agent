@@ -175,7 +175,14 @@ def _process_message(message_id: str, dry_run: bool) -> None:
 
 
 def _build_references(existing: str, message_id_header: str) -> str:
-    """Append *message_id_header* to the References chain."""
-    if existing:
-        return f"{existing} {message_id_header}".strip()
-    return message_id_header
+    """Append *message_id_header* to the References chain.
+
+    Internal whitespace is collapsed: real-world headers occasionally come
+    back with multiple spaces between message IDs (line-folded headers,
+    upstream reformatting), and emitting those verbatim produces ugly
+    ``References:`` lines that some MUAs render with visible gaps.
+    """
+    if not existing:
+        return message_id_header
+    parts = existing.split() + [message_id_header]
+    return " ".join(parts)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import click
 from click.testing import CliRunner
 
 from wayonagio_email_agent.cli import cli
@@ -111,6 +112,52 @@ class TestKBIngestCommand:
         assert "/tmp/kb_index.sqlite" in result.output
 
 
+class TestDraftReplyCommand:
+    def test_prints_draft_id_on_success(self):
+        runner = CliRunner()
+        with patch(
+            "wayonagio_email_agent.agent.manual_draft_flow",
+            return_value={"id": "draft-123"},
+        ):
+            result = runner.invoke(cli, ["draft-reply", "msg-1"])
+        assert result.exit_code == 0, result.output
+        assert "draft-123" in result.output
+
+    def test_kb_unavailable_surfaces_clean_error(self):
+        """Same contract as the API's 503: operators must see an actionable
+        one-line error pointing at kb-ingest, not a Python traceback."""
+        runner = CliRunner()
+
+        from wayonagio_email_agent.kb.retrieve import KBUnavailableError
+
+        with patch(
+            "wayonagio_email_agent.agent.manual_draft_flow",
+            side_effect=KBUnavailableError(
+                "KB index artifact could not be downloaded."
+            ),
+        ):
+            result = runner.invoke(cli, ["draft-reply", "msg-1"])
+
+        assert result.exit_code != 0
+        assert "kb-ingest" in result.output
+        assert "Traceback" not in result.output
+
+    def test_empty_reply_surfaces_clean_error(self):
+        runner = CliRunner()
+
+        from wayonagio_email_agent.llm.client import EmptyReplyError
+
+        with patch(
+            "wayonagio_email_agent.agent.manual_draft_flow",
+            side_effect=EmptyReplyError("LLM returned an empty reply."),
+        ):
+            result = runner.invoke(cli, ["draft-reply", "msg-1"])
+
+        assert result.exit_code != 0
+        assert "empty reply" in result.output.lower()
+        assert "Traceback" not in result.output
+
+
 class TestKBSearchCommand:
     def test_prints_results_when_hits_exist(self):
         runner = CliRunner()
@@ -142,4 +189,109 @@ class TestKBSearchCommand:
             result = runner.invoke(cli, ["kb-search", "nothing", "--top-k", "3"])
 
         assert result.exit_code == 0, result.output
-        assert "KB_ENABLED" in result.output
+        assert "no matches" in result.output.lower()
+
+    def test_kb_unavailable_surfaces_clean_error(self):
+        """A missing artifact must produce a one-line error and a non-zero
+        exit code, NOT a Python traceback."""
+        runner = CliRunner()
+
+        from wayonagio_email_agent.kb.retrieve import KBUnavailableError
+
+        with patch(
+            "wayonagio_email_agent.kb.retrieve.retrieve",
+            side_effect=KBUnavailableError(
+                "KB index artifact could not be downloaded. Run `kb-ingest`."
+            ),
+        ):
+            result = runner.invoke(cli, ["kb-search", "anything"])
+
+        assert result.exit_code != 0
+        # ClickException is the clean exit path; any other exception type is
+        # a regression (means we let the underlying error escape unwrapped).
+        assert result.exception is None or isinstance(
+            result.exception, (SystemExit, click.ClickException)
+        ), f"Unexpected exception type: {type(result.exception).__name__}"
+        assert "kb-ingest" in result.output
+        assert "Traceback" not in result.output
+
+    def test_kb_config_error_surfaces_clean_error(self):
+        runner = CliRunner()
+
+        from wayonagio_email_agent.kb.config import KBConfigError
+
+        with patch(
+            "wayonagio_email_agent.kb.retrieve.retrieve",
+            side_effect=KBConfigError("KB_RAG_FOLDER_IDS is required."),
+        ):
+            result = runner.invoke(cli, ["kb-search", "anything"])
+
+        assert result.exit_code != 0
+        assert "KB_RAG_FOLDER_IDS" in result.output
+        assert "Traceback" not in result.output
+
+
+class TestExemplarListCommand:
+    def test_prints_each_exemplar_with_title_and_preview(self):
+        from wayonagio_email_agent.exemplars.source import Exemplar
+
+        runner = CliRunner()
+        sample = [
+            Exemplar(title="Refund policy", text="Hello, thank you for...", source_id="d1"),
+            Exemplar(title="Altitude tips", text="Many of our clients arrive...", source_id="d2"),
+        ]
+
+        with patch(
+            "wayonagio_email_agent.exemplars.loader.get_all_exemplars",
+            return_value=sample,
+        ):
+            result = runner.invoke(cli, ["exemplar-list"])
+
+        assert result.exit_code == 0, result.output
+        assert "Refund policy" in result.output
+        assert "Altitude tips" in result.output
+        assert "d1" in result.output
+        assert "d2" in result.output
+        assert "Hello, thank you for..." in result.output
+
+    def test_disabled_or_empty_prints_actionable_hint(self):
+        runner = CliRunner()
+        with patch(
+            "wayonagio_email_agent.exemplars.loader.get_all_exemplars",
+            return_value=[],
+        ):
+            result = runner.invoke(cli, ["exemplar-list"])
+
+        assert result.exit_code == 0, result.output
+        assert "KB_EXEMPLAR_FOLDER_IDS" in result.output
+
+    def test_truncates_long_preview(self):
+        from wayonagio_email_agent.exemplars.source import Exemplar
+
+        runner = CliRunner()
+        long_body = "X" * 1000
+        with patch(
+            "wayonagio_email_agent.exemplars.loader.get_all_exemplars",
+            return_value=[Exemplar(title="Big", text=long_body, source_id="d")],
+        ):
+            result = runner.invoke(cli, ["exemplar-list", "--preview-chars", "50"])
+
+        assert result.exit_code == 0
+        assert "..." in result.output
+        # The full body must NOT appear at the configured cap.
+        assert "X" * 1000 not in result.output
+
+    def test_unexpected_loader_failure_surfaces_clean_error(self):
+        """Defensive: the loader is contracted not to raise, but if a
+        future bug or refactor lets one through, the operator must see a
+        clean one-line error rather than a Python traceback."""
+        runner = CliRunner()
+        with patch(
+            "wayonagio_email_agent.exemplars.loader.get_all_exemplars",
+            side_effect=RuntimeError("loader misbehaved"),
+        ):
+            result = runner.invoke(cli, ["exemplar-list"])
+
+        assert result.exit_code != 0
+        assert "Could not load exemplars" in result.output
+        assert "Traceback" not in result.output

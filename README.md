@@ -56,6 +56,7 @@ cp .env.example .env
 | `SCANNER_ENABLED` | always | Feature flag for automatic scanner (`false` by default) |
 | `SCANNER_STATE_DB` | always | SQLite DB path for scanner dedup state (default: `scanner_state.db`) |
 | `LOG_LEVEL` | always | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` (default: `INFO`) |
+| `KB_EXEMPLAR_FOLDER_IDS` | optional | Comma-separated Drive folder IDs/URLs containing curator-written example replies. Empty = exemplars disabled. See [Exemplars (optional)](#exemplars-optional). |
 
 ### Choosing an LLM provider
 
@@ -249,31 +250,34 @@ uv run python -m wayonagio_email_agent.cli kb-ingest
 uv run python -m wayonagio_email_agent.cli kb-search "how much is Machu Picchu?"
 ```
 
-### Knowledge base (optional)
+### Knowledge base (required)
 
-The knowledge base is an opt-in RAG feature that reads content from Google Drive and uses it to make drafts more accurate. It is fully off by default (`KB_ENABLED=false`); the agent behaves exactly as before when it is disabled. Point `KB_RAG_FOLDER_IDS` at whatever Drive folder IDs (or share URLs) the agency already uses — no folder renaming required.
+The knowledge base is a **required** RAG component that reads content from Google Drive and grounds every draft in agency-specific facts. Without it the agent refuses to draft — an ungrounded reply that staff might send unmodified is worse than no reply at all. Point `KB_RAG_FOLDER_IDS` at whatever Drive folder IDs (or share URLs) the agency already uses for tour descriptions, FAQs, and templates — no folder renaming required.
 
 The ingest pipeline walks every configured folder (recursively, by default), extracts text from Google Docs, PDFs, plain text, and Markdown, chunks and embeds it, and publishes a single artifact:
 
 - `kb_index.sqlite` — vector index with embeddings (default model: `gemini/text-embedding-004`, dimension 768).
 
-Artifacts land in `KB_GCS_URI` (Cloud Run) or `KB_LOCAL_DIR` (dev / single-host). The API and scanner read them at cold start; any failure — missing artifact, KB disabled, embedding error — falls back silently to the base prompt so KB outages never block drafting.
+Artifacts land in `KB_GCS_URI` (Cloud Run) or `KB_LOCAL_DIR` (dev / single-host). The API and scanner load the index at cold start. KB failures (no artifact published yet, GCS unreachable, embedding API down, embedding-model mismatch) raise `KBUnavailableError` and the draft request fails with a clear error rather than degrading silently.
 
 Environment variables (see [.env.example](.env.example) for the full list):
 
 | Variable | Description |
 |---|---|
-| `KB_ENABLED` | Feature flag. Leave `false` until the index has been ingested. |
-| `KB_RAG_FOLDER_IDS` | Required when `KB_ENABLED=true`. Comma-separated Drive folder IDs or share URLs. |
+| `KB_RAG_FOLDER_IDS` | **Required.** Comma-separated Drive folder IDs or share URLs. Drafting fails without it. |
 | `KB_RAG_RECURSIVE` | Walk subfolders (default `true`). |
 | `KB_EMBEDDING_MODEL` | LiteLLM model string for embeddings (default `gemini/text-embedding-004`). |
 | `KB_GCS_URI` | Production: `gs://bucket[/prefix]`. The index lives here. |
 | `KB_LOCAL_DIR` | Dev fallback when `KB_GCS_URI` is unset (default `./kb_artifacts`). |
 | `KB_TOP_K` | Chunks to retrieve per email (default `4`). |
 
-**Drive OAuth scope.** The agent authentication already requests `drive.readonly` alongside the two Gmail scopes, so no re-auth is needed when you flip `KB_ENABLED` on; `cli auth` asks for all three up front. If you authenticated before this feature existed, delete `token.json` and re-run `cli auth` once.
+**First-run order matters.** Before the API can serve any draft, run `cli kb-ingest` once so a fresh `kb_index.sqlite` exists at `KB_GCS_URI` / `KB_LOCAL_DIR`.
 
-**Cloud Run deployment.** The ingest pipeline runs as a **Cloud Run Job** triggered by **Cloud Scheduler** on whatever cadence fits your content's churn rate (daily is usually plenty). The Job container entrypoint is `python -m wayonagio_email_agent.cli kb-ingest`. Grant its service account:
+**Drive OAuth scope.** The agent authentication requests `drive.readonly` alongside the two Gmail scopes; `cli auth` asks for all three up front. If you authenticated before this feature existed, delete `token.json` and re-run `cli auth` once.
+
+**Cadence.** The agency edits this material roughly **once a year** (the seasonal refresh of tour catalogs, prices, and policies). That's a strong feature: the KB has near-zero risk of going stale between updates, and re-ingest costs (embedding API calls + GCS write) are essentially a once-a-year line item rather than a recurring expense. The flip side is operational: **schedule a yearly re-ingest** and treat it as a calendar reminder, not a daily background job. Any content edit out of cycle should also trigger an on-demand `cli kb-ingest` so the next draft sees it.
+
+**Cloud Run deployment.** The ingest pipeline runs as a **Cloud Run Job** triggered by **Cloud Scheduler** on whatever cadence fits your content's churn rate. For this agency, **once a year** matches how often the source documents actually change. The Job container entrypoint is `python -m wayonagio_email_agent.cli kb-ingest`. Grant its service account:
 
 - `roles/storage.objectAdmin` on the bucket behind `KB_GCS_URI`.
 - `roles/secretmanager.secretAccessor` on the same secrets as the API (Gmail/Drive token, Gemini key, bearer token — reuse the existing service account if you prefer).
@@ -292,32 +296,67 @@ gcloud run jobs create wayonagio-kb-ingest \
   --service-account="wayonagio-run@$(gcloud config get-value project).iam.gserviceaccount.com" \
   --command="python" \
   --args="-m,wayonagio_email_agent.cli,kb-ingest" \
-  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,KB_ENABLED=true,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids>,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json \
+  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids>,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json \
   --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest,GEMINI_API_KEY=gemini-api-key:latest \
   --set-secrets=/secrets/credentials.json=gmail-credentials:latest,/secrets/token.json=gmail-token:latest
 
-# Schedule it (daily at 04:15 UTC)
-gcloud scheduler jobs create http wayonagio-kb-ingest-daily \
+# Schedule it (yearly on Jan 15 at 04:15 UTC — the agency refreshes its
+# tour catalog, prices, and policies annually). Run `cli kb-ingest`
+# on-demand whenever an out-of-cycle edit lands in Drive.
+gcloud scheduler jobs create http wayonagio-kb-ingest-yearly \
   --location=us-central1 \
-  --schedule="15 4 * * *" \
+  --schedule="15 4 15 1 *" \
   --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$(gcloud config get-value project)/jobs/wayonagio-kb-ingest:run" \
   --http-method=POST \
   --oauth-service-account-email="wayonagio-run@$(gcloud config get-value project).iam.gserviceaccount.com"
 ```
 
-After the first successful ingest, flip the API service to pick up the KB:
+After the first successful ingest, point the API service at the same artifact:
 
 ```bash
 gcloud run services update wayonagio-email-agent \
   --region=us-central1 \
-  --update-env-vars=KB_ENABLED=true,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004
+  --update-env-vars=KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids>
 ```
+
+The API will start serving drafts grounded in the freshly-ingested corpus on its next cold start. Until the first ingest completes, draft requests fail loudly — that is intentional, since an ungrounded draft is worse than a deferred one.
 
 You can sanity-check retrieval without ever sending an email:
 
 ```bash
 uv run python -m wayonagio_email_agent.cli kb-search "inca trail permit availability"
 ```
+
+### Exemplars (optional)
+
+Where the **knowledge base** grounds replies in agency facts (the *what*), the **exemplars** layer sets the agency's voice — the *how*. It's a small, opt-in companion module that reads a curator-managed Drive folder where each Google Doc is one example reply, then injects all of them as a separate `EXAMPLE RESPONSES` block in the LLM prompt. The framing tells the model to mirror style and structure but to defer to the KB whenever an example contradicts it on facts.
+
+**Why this is separate from the KB.** The KB is *required*, *fail-loud*, and chunked + retrieved per email (RAG). Exemplars are *optional*, *graceful*, and **raw-injected without retrieval** — the curator-led pool is small enough (10–50 docs) that the entire set fits in the LLM context window, so we trade RAG's per-request latency and operational complexity for a much simpler shape. KB failures abort drafting; exemplar failures degrade silently to KB-only.
+
+**Curator contract.**
+1. Create a dedicated Drive folder; share it with the same service account that has `KB_RAG_FOLDER_IDS` access (already in scope, no new OAuth grant needed).
+2. **One Doc per exemplar.** Title each Doc with what it covers ("Refund policy for weather cancellations", "Altitude sickness preparation"); the title becomes the example heading in the prompt.
+3. Each Doc is one self-contained reply — Q+A pair, template, or a representative thread excerpt. Use Markdown freely; no schema.
+4. **Anonymize while writing.** Use placeholders like `<guest>`, `<tour-name>`, `<date>`. The curator's eyeball is the primary defense against PII leaks.
+5. The runtime regex pass (`exemplars/sanitize.py`) is a tripwire that catches the obvious mechanical leaks the curator might miss — emails, phone numbers, IBANs, Luhn-valid card numbers, booking URLs. Anything it catches is logged at WARNING; an integration tripwire test in CI guards that nothing slips past.
+
+**Configuration.** Set `KB_EXEMPLAR_FOLDER_IDS` to one or more Drive folder IDs or share URLs (comma-separated). Unset = exemplars disabled, no behavior change. The same `drive.readonly` scope already in the OAuth grant covers reads.
+
+**Refresh story.** Exemplars are loaded **once per process**: the first call after a Cloud Run cold start reads Drive (in parallel via a thread pool — ~1s for 30 Docs), sanitizes, and caches in memory. The FastAPI app installs a `lifespan` warm-up hook that runs this load synchronously during container startup, **before** the instance accepts traffic, so the first user request pays 0ms for exemplars. Curator edits to a Doc become visible after the next process cold start; for an immediate refresh, trigger a new Cloud Run revision rollout.
+
+For zero cold-start spikes between refreshes, deploy the API with **`--min-instances=1`** (~$5–10/month). One always-warm instance means the warm-up runs once at deploy time and every subsequent request reuses the cached pool. Without `min-instances`, Cloud Run still calls the warm-up on each cold start, so cold-start latency for the *first* user request is unaffected by exemplars; only the container boot itself is slightly longer.
+
+**Sanity check what the agent sees.**
+
+```bash
+uv run python -m wayonagio_email_agent.cli exemplar-list
+```
+
+This prints the Drive Doc title, ID, and a short body preview (post-sanitization) for each exemplar in the order the runtime will see them. Useful for confirming a curator's edit landed and that PII redaction did its job.
+
+**Failure behavior.** Every exemplar failure path returns an empty list: feature disabled, Drive unreachable, folder empty, Doc unreadable, Doc is empty after extraction. Drafts simply omit the `EXAMPLE RESPONSES` block. Failures are logged at WARNING and cached for the process lifetime so a Drive outage doesn't trigger per-request retries.
+
+For the full design rationale (why raw injection over RAG, why one Doc per exemplar, the migration path if the pool ever outgrows the context window), see [`src/wayonagio_email_agent/exemplars/README.md`](src/wayonagio_email_agent/exemplars/README.md).
 
 ## Gmail Add-on setup
 
@@ -827,7 +866,7 @@ src/wayonagio_email_agent/
   api.py              # FastAPI: POST /draft-reply
   cli.py              # CLI: auth, list, draft-reply, scan, scan-once, kb-ingest, kb-search
   state.py            # SQLite dedup state for scanner
-  kb/                 # Knowledge base (optional, KB_ENABLED)
+  kb/                 # Knowledge base (required, KB_RAG_FOLDER_IDS)
     config.py         # Env-driven KB config + Drive URL parsing
     drive.py          # Drive wrapper: list folders, export Docs, download files
     extract.py        # MIME-dispatched text extraction (PDF / Docs / txt / md)
@@ -837,6 +876,12 @@ src/wayonagio_email_agent/
     artifact.py       # GCS + local artifact I/O
     retrieve.py       # Runtime: retrieve() for llm/client
     ingest.py         # End-to-end ingest pipeline (kb-ingest)
+  exemplars/          # Curator-led example replies (optional, KB_EXEMPLAR_FOLDER_IDS)
+    config.py         # Env-driven exemplar config (parallel to kb.config)
+    sanitize.py       # PII tripwire: BOOKING_URL/email/IBAN/Luhn-card/phone passes
+    source.py         # Drive-folder source, parallel ThreadPoolExecutor reads
+    loader.py         # Process-level cache, double-checked lock, never-raises contract
+    prompt.py         # Format the EXAMPLE RESPONSES block with KB-precedence framing
 addon/
   Code.gs             # Apps Script: Gmail contextual Add-on
   appsscript.json
@@ -848,4 +893,8 @@ tests/
   test_kb_*.py
 ```
 
-See `AGENTS.md` for developer guidance.
+For deeper technical context:
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — system-level technical writeup: how every module wires together, the cross-cutting concerns, the load-bearing invariants, and the rationale for the shape of the codebase.
+- [`src/wayonagio_email_agent/kb/README.md`](src/wayonagio_email_agent/kb/README.md) — deep dive on the knowledge base specifically.
+- [`AGENTS.md`](AGENTS.md) — quick orientation for AI coding agents working in this repo.

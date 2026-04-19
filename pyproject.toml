@@ -31,6 +31,12 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 filterwarnings = [
+    # Treat ResourceWarning as a test failure: the SQLite connection leak in
+    # state.py and kb/store.py both surfaced this way and silently passed CI
+    # for weeks before we caught them. Locking it down here means any new
+    # leak (file handle, socket, sqlite connection) breaks the suite the
+    # moment it's introduced.
+    "error::ResourceWarning",
     # Starlette's BaseHTTPMiddleware internals still reference the pre-RFC9110
     # name for HTTP 413. Our own code uses HTTP_413_CONTENT_TOO_LARGE; this
     # filter keeps the test output focused on issues we can actually fix.

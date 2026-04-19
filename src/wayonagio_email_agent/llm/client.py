@@ -202,21 +202,49 @@ def generate_reply(original: str, language: str) -> str:
     if the LLM returns an empty or whitespace-only string so the caller can
     decline to draft rather than silently creating a blank email.
 
-    When the optional knowledge base is enabled (``KB_ENABLED=true`` and an
-    index is available), the top-k retrieved chunks are inserted as a
-    clearly-delimited ``REFERENCE MATERIAL`` section. If retrieval fails, we
-    silently fall back to the base prompt rather than refuse to draft.
+    The knowledge base is **required**. The top-k retrieved chunks are
+    inserted as a clearly-delimited ``REFERENCE MATERIAL`` section so the
+    model can ground specific facts (prices, inclusions, durations, policies)
+    in agency content rather than hallucinate them. If KB retrieval fails
+    (artifact missing, embedding API down, model mismatch), the exception
+    propagates and no draft is created — an ungrounded draft that staff might
+    send unmodified is worse than no draft at all.
+
+    The exemplars subsystem (``exemplars/``) is **optional and graceful**:
+    when enabled and populated, the curator-managed example replies are
+    appended *after* the REFERENCE MATERIAL block as ``EXAMPLE RESPONSES``,
+    with explicit framing that the KB wins on facts. When disabled or
+    empty, the EXAMPLE RESPONSES block is omitted entirely so the prompt
+    stays minimal. Exemplar load failures never block drafting — the
+    loader returns ``[]`` and we proceed with KB-only grounding.
     """
+    from wayonagio_email_agent.exemplars import loader as exemplar_loader
+    from wayonagio_email_agent.exemplars import prompt as exemplar_prompt
     from wayonagio_email_agent.kb import retrieve as kb_retrieve
 
     lang_name = _LANG_NAMES.get(language, "English")
 
-    try:
-        hits = kb_retrieve.retrieve(original)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("KB retrieval unavailable: %s", exc)
-        hits = []
+    hits = kb_retrieve.retrieve(original)
     reference_block = kb_retrieve.format_reference_block(hits) if hits else ""
+
+    # Belt-and-suspenders: ``exemplar_loader.get_all_exemplars`` is contracted
+    # to never raise (it catches all collection errors and caches ``[]``).
+    # We still wrap the call here so the "exemplars never block a draft"
+    # invariant holds even if a future regression weakens the loader's
+    # safety net — e.g. someone narrows the except clause and a new error
+    # type slips through. The KB stays fail-loud above; only exemplars
+    # degrade silently.
+    try:
+        exemplars = exemplar_loader.get_all_exemplars()
+    except Exception as exc:  # noqa: BLE001 — exemplars are optional + graceful
+        logger.warning(
+            "Exemplar loader violated its never-raises contract; "
+            "drafting will continue with KB-only grounding: %s",
+            exc,
+            exc_info=True,
+        )
+        exemplars = []
+    exemplar_block = exemplar_prompt.format_exemplar_block(exemplars)
 
     user_content = (
         f"LANGUAGE REQUIREMENT: Write your entire reply in {lang_name}. "
@@ -237,6 +265,29 @@ def generate_reply(original: str, language: str) -> str:
             "clarification or offer to follow up.\n\n"
             f"{reference_block}\n\n"
         )
+    # Exemplars come AFTER the reference block on purpose: the framing in
+    # ``format_exemplar_block`` says "the REFERENCE MATERIAL above is
+    # authoritative", and "above" only reads correctly if the order on the
+    # page matches the words. Don't reorder these two blocks without also
+    # editing exemplars/prompt.py.
+    #
+    # We additionally only inject exemplars when the reference block is
+    # present. This is two safety properties in one:
+    #
+    # 1. The exemplar framing literally says "REFERENCE MATERIAL above" —
+    #    without a reference block, that instruction is incoherent and
+    #    could confuse the model.
+    # 2. Exemplars without KB grounding are dangerous: the model may copy
+    #    example facts (prices, durations) verbatim with no canonical
+    #    source to override them. The KB is the only thing standing
+    #    between examples and stale facts in the draft.
+    #
+    # In practice the KB is required and almost always returns hits, so
+    # this branch nearly always fires; the guard exists for the
+    # pathological case (`top_k=0`, an index with zero chunks) so the
+    # prompt stays coherent rather than self-contradictory.
+    if exemplar_block and reference_block:
+        user_content += f"{exemplar_block}\n\n"
     user_content += f"CLIENT EMAIL:\n{original}\n\nYOUR REPLY (in {lang_name}):"
 
     messages = [

@@ -78,6 +78,24 @@ class TestDetectLanguage:
 # ---------------------------------------------------------------------------
 
 class TestGenerateReply:
+    @pytest.fixture(autouse=True)
+    def _stub_kb_and_exemplars(self, monkeypatch):
+        """Stub both load-bearing dependencies so these tests focus on the
+        LLM side of ``generate_reply``:
+
+        * KB is required at runtime — without a stub, retrieval would try
+          to download a non-existent index.
+        * Exemplars are optional and graceful, but the loader maintains a
+          process-level cache. Default to ``[]`` so most tests don't have
+          to think about the EXAMPLE RESPONSES block; tests that need it
+          override the loader explicitly.
+        """
+        from wayonagio_email_agent.exemplars import loader as exemplar_loader
+        from wayonagio_email_agent.kb import retrieve as kb_retrieve
+
+        monkeypatch.setattr(kb_retrieve, "retrieve", lambda q, top_k=None: [])
+        monkeypatch.setattr(exemplar_loader, "get_all_exemplars", lambda: [])
+
     def test_returns_reply_text(self):
         expected = "Gentile cliente, grazie per la sua richiesta."
         with patch("wayonagio_email_agent.llm.client._chat", return_value=expected):
@@ -126,22 +144,15 @@ class TestGenerateReply:
 # ---------------------------------------------------------------------------
 
 class TestGenerateReplyKBIntegration:
-    """Wire-up tests: the KB must augment the prompt when enabled, and never
-    block drafting when KB calls fail."""
+    """Wire-up tests: the KB is required, must augment the prompt with hits,
+    and KB failures must block drafting (rather than silently producing an
+    ungrounded reply that staff might send unmodified)."""
 
-    def test_prompt_unchanged_when_kb_disabled(self, monkeypatch):
-        monkeypatch.setenv("KB_ENABLED", "false")
-        from wayonagio_email_agent.kb import retrieve as kb_retrieve
+    @pytest.fixture(autouse=True)
+    def _stub_exemplars(self, monkeypatch):
+        from wayonagio_email_agent.exemplars import loader as exemplar_loader
 
-        kb_retrieve.reset_cache()
-
-        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
-            mock_chat.return_value = "reply"
-            generate_reply("Hello", "en")
-
-        messages = mock_chat.call_args[0][0]
-        user = next(m for m in messages if m["role"] == "user")["content"]
-        assert "REFERENCE MATERIAL" not in user
+        monkeypatch.setattr(exemplar_loader, "get_all_exemplars", lambda: [])
 
     def test_retrieved_chunks_are_injected_into_user_prompt(self, monkeypatch):
         from wayonagio_email_agent.kb import retrieve as kb_retrieve
@@ -168,19 +179,189 @@ class TestGenerateReplyKBIntegration:
         assert "Machu Picchu tour costs $250/person." in user
         assert "USE OF REFERENCE MATERIAL" in user
 
-    def test_kb_failures_do_not_block_drafting(self, monkeypatch):
+    def test_kb_failures_block_drafting(self, monkeypatch):
+        """Refusing to draft is preferable to drafting an ungrounded reply."""
         from wayonagio_email_agent.kb import retrieve as kb_retrieve
 
         def boom(*_a, **_kw):
-            raise RuntimeError("KB down")
+            raise kb_retrieve.KBUnavailableError("KB down")
 
         monkeypatch.setattr(kb_retrieve, "retrieve", boom)
 
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "reply"
-            result = generate_reply("Hello", "en")
+            with pytest.raises(kb_retrieve.KBUnavailableError):
+                generate_reply("Hello", "en")
+
+        mock_chat.assert_not_called()
+
+
+class TestGenerateReplyExemplarIntegration:
+    """Wire-up tests for the exemplars side of the prompt. The KB is the
+    hard requirement; exemplars are the optional, graceful style layer.
+
+    The plan calls out two contracts that must hold simultaneously:
+
+    1. When exemplars are present, the EXAMPLE RESPONSES block lands AFTER
+       the REFERENCE MATERIAL block in the prompt — the framing inside the
+       block says "the REFERENCE MATERIAL above is authoritative", which
+       only reads correctly if the order on the page matches the words.
+    2. Exemplar load failures must NOT block drafting. The loader is
+       contracted to return ``[]`` on failure; if a future bug lets an
+       exception escape, drafting still degrades to KB-only rather than
+       breaking entirely.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_kb_with_hit(self, monkeypatch):
+        """Provide a real KB hit so we can assert ordering of the two blocks."""
+        from wayonagio_email_agent.kb import retrieve as kb_retrieve
+        from wayonagio_email_agent.kb.store import ScoredChunk
+
+        chunk = ScoredChunk(
+            text="Salkantay trek is 4 days, $480 per person.",
+            source_id="sid",
+            source_name="Salkantay.md",
+            source_path="Tours / Salkantay.md",
+            chunk_index=0,
+            score=0.91,
+        )
+        monkeypatch.setattr(kb_retrieve, "retrieve", lambda q, top_k=None: [chunk])
+
+    def test_exemplar_block_is_injected_after_reference_material(self, monkeypatch):
+        from wayonagio_email_agent.exemplars import loader as exemplar_loader
+        from wayonagio_email_agent.exemplars.source import Exemplar
+
+        monkeypatch.setattr(
+            exemplar_loader,
+            "get_all_exemplars",
+            lambda: [
+                Exemplar(
+                    title="Refund policy",
+                    text="Hi, thank you for your message about cancellations.",
+                    source_id="ex1",
+                )
+            ],
+        )
+
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            generate_reply("Can I get a refund?", "en")
+
+        user = next(
+            m for m in mock_chat.call_args[0][0] if m["role"] == "user"
+        )["content"]
+
+        assert "REFERENCE MATERIAL" in user
+        assert "EXAMPLE RESPONSES" in user
+        assert "Refund policy" in user
+        assert "Hi, thank you for your message" in user
+
+        # Ordering contract — REFERENCE before EXAMPLE.
+        ref_idx = user.index("--- REFERENCE MATERIAL ---")
+        ex_idx = user.index("--- EXAMPLE RESPONSES ---")
+        client_idx = user.index("CLIENT EMAIL:")
+        assert ref_idx < ex_idx < client_idx, (
+            "Prompt block ordering must be REFERENCE → EXAMPLE → CLIENT EMAIL"
+        )
+
+        # KB-precedence framing must be present whenever exemplars are.
+        assert "if an example contradicts it, follow the REFERENCE MATERIAL" in user
+
+    def test_no_exemplar_block_when_loader_returns_empty(self, monkeypatch):
+        from wayonagio_email_agent.exemplars import loader as exemplar_loader
+
+        monkeypatch.setattr(exemplar_loader, "get_all_exemplars", lambda: [])
+
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            generate_reply("Hello", "en")
+
+        user = next(
+            m for m in mock_chat.call_args[0][0] if m["role"] == "user"
+        )["content"]
+        assert "EXAMPLE RESPONSES" not in user
+        # KB block still present — exemplars-off must not affect KB wiring.
+        assert "REFERENCE MATERIAL" in user
+
+    def test_no_exemplar_block_when_kb_returns_no_hits(self, monkeypatch):
+        """Coherence guard: the EXAMPLE RESPONSES block's framing reads
+        "REFERENCE MATERIAL above is authoritative", which is meaningless
+        when the KB returned no hits and there's no REFERENCE MATERIAL
+        block in the prompt. Exemplars without KB grounding are also
+        dangerous (model may copy example facts unmoored), so we
+        additionally suppress exemplars whenever the KB had nothing
+        relevant. KB is required, so this branch is the pathological
+        edge-case path (``top_k=0`` / empty index), but the prompt must
+        stay coherent regardless.
+        """
+        from wayonagio_email_agent.exemplars import loader as exemplar_loader
+        from wayonagio_email_agent.exemplars.source import Exemplar
+        from wayonagio_email_agent.kb import retrieve as kb_retrieve
+
+        # Override the autouse KB stub from above to return [] this time.
+        monkeypatch.setattr(kb_retrieve, "retrieve", lambda q, top_k=None: [])
+        monkeypatch.setattr(
+            exemplar_loader,
+            "get_all_exemplars",
+            lambda: [Exemplar(title="t", text="b", source_id="x")],
+        )
+
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            generate_reply("Hello", "en")
+
+        user = next(
+            m for m in mock_chat.call_args[0][0] if m["role"] == "user"
+        )["content"]
+        assert "REFERENCE MATERIAL" not in user
+        assert "EXAMPLE RESPONSES" not in user, (
+            "Exemplars must not appear when no REFERENCE MATERIAL block "
+            "is in the prompt — the framing depends on it being present."
+        )
+
+    def test_exemplar_loader_exception_does_not_block_drafting(
+        self, monkeypatch, caplog
+    ):
+        """Defensive contract: ``loader.get_all_exemplars`` is supposed to
+        never raise, but the LLM client wraps the call anyway so that even
+        a future regression in the loader's safety net can't take down the
+        (working, KB-grounded) draft path. Exemplars are optional and
+        graceful — that promise is enforced at both layers.
+
+        When a (mocked) loader raises, ``generate_reply`` must:
+
+        * log a WARNING that names the contract violation,
+        * fall back to an empty exemplar block,
+        * still call the LLM and return the reply.
+        """
+        from wayonagio_email_agent.exemplars import loader as exemplar_loader
+
+        monkeypatch.setattr(
+            exemplar_loader,
+            "get_all_exemplars",
+            lambda: (_ for _ in ()).throw(RuntimeError("loader contract broken")),
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="wayonagio_email_agent.llm.client"
+        ):
+            with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+                mock_chat.return_value = "reply"
+                result = generate_reply("Hello", "en")
 
         assert result == "reply"
+        # KB block still present, exemplar block omitted entirely.
+        user = next(
+            m for m in mock_chat.call_args[0][0] if m["role"] == "user"
+        )["content"]
+        assert "REFERENCE MATERIAL" in user
+        assert "EXAMPLE RESPONSES" not in user
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "never-raises contract" in m for m in messages
+        ), "expected a WARNING naming the loader contract violation"
 
 
 # ---------------------------------------------------------------------------

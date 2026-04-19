@@ -1,10 +1,11 @@
 # Knowledge base (`kb/`)
 
-Retrieval-Augmented Generation for the email agent. **Opt-in** (gated by
-`KB_ENABLED`), **non-blocking** (every failure falls back to the base prompt),
-and deliberately small. This document explains how each piece works, why it
-looks the way it does, what it is and isn't good at, and where you'd go next
-if the agency outgrew it.
+Retrieval-Augmented Generation for the email agent. **Required**
+(`KB_RAG_FOLDER_IDS` is mandatory; the agent refuses to draft without a
+usable index), **fail-loud** (every failure raises `KBUnavailableError` rather
+than silently producing an ungrounded reply), and deliberately small. This
+document explains how each piece works, why it looks the way it does, what
+it is and isn't good at, and where you'd go next if the agency outgrew it.
 
 ---
 
@@ -197,14 +198,18 @@ The only module `llm/client.py` imports from. Responsible for:
 2. **Thread-safe cache.** Module-level lock + double-checked lock inside
    `_ensure_loaded()` — safe under Uvicorn's async event loop because
    FastAPI's sync-endpoint path runs handlers on a threadpool.
-3. **Graceful degradation.** Every failure mode (KB disabled, artifact
-   missing, embedding error, empty index) returns `[]`. The agent keeps
-   drafting; KB is a quality lever, not a requirement.
-4. **Embedding-model mismatch detection.** If the loaded index was built with
-   a different `embedding_model` than the current `KBConfig`, we drop the
-   index and log a loud warning — a mismatched model means mismatched vector
-   dimensions, which would otherwise crash the matmul on every draft.
-5. **`reset_cache()`** — exposed for tests, and reserved for a future admin
+3. **Fail-loud, never silent.** Every failure mode (artifact missing,
+   embedding error, empty index, model mismatch) raises `KBUnavailableError`
+   so `generate_reply` aborts the draft. Refusing to draft is preferable to
+   producing an ungrounded reply that staff might send unmodified.
+4. **Failed loads are not cached.** If `_load_state` raises, the global
+   `_state` stays `None`, so a transient outage (GCS hiccup, race with
+   in-progress ingest) self-heals on the next request.
+5. **Embedding-model mismatch detection.** If the loaded index was built with
+   a different `embedding_model` than the current `KBConfig`, we raise with
+   a clear "re-run kb-ingest" message — a mismatched model means mismatched
+   vector dimensions, which would otherwise crash the matmul on every draft.
+6. **`reset_cache()`** — exposed for tests, and reserved for a future admin
    `POST /kb/reload` endpoint if we ever want to hot-swap the index without
    a redeploy.
 
@@ -214,12 +219,13 @@ A straight-line function: resolve config → list Drive folders → extract +
 chunk + embed → write SQLite → upload. Single-pass, stateless, idempotent.
 Two safety guards worth calling out:
 
-- **Refuses to run with `KB_ENABLED=false`** — publishing artifacts that
-  nothing will read is almost always a config mistake.
+- **Requires `KB_RAG_FOLDER_IDS`** — `config.load()` raises if it isn't set,
+  so misconfiguration is caught at startup rather than silently producing
+  no-op artifacts.
 - **Refuses to publish an empty index when RAG folders are configured** — if
   every file failed to extract (perms, corrupt PDFs, empty folder), aborting
   is far better than silently overwriting a previously-good index with a
-  zero-row one.
+  zero-row one (which would in turn poison every subsequent draft).
 
 ---
 
@@ -228,19 +234,28 @@ Two safety guards worth calling out:
 1. FastAPI receives `POST /draft-reply` → `agent.manual_draft_flow` → `llm/client.generate_reply`.
 2. `generate_reply` calls `kb_retrieve.retrieve(original_email_text)`.
 3. `retrieve()` on first use:
-   - Loads `KBConfig` from env. If disabled, returns `[]` immediately.
-   - Downloads `kb_index.sqlite` from GCS/local into `/tmp`.
+   - Loads `KBConfig` from env. Raises `KBConfigError` if `KB_RAG_FOLDER_IDS`
+     is missing.
+   - Downloads `kb_index.sqlite` from GCS/local into `/tmp`. Raises
+     `KBUnavailableError` if the artifact is missing, the index is empty, or
+     the embedding model has been rotated without a re-ingest.
    - Slurps it into a numpy matrix, L2-normalizes once.
-   - Caches the `LoadedIndex` under a lock.
+   - Caches the `LoadedIndex` under a lock. Failed loads are NOT cached, so
+     transient outages self-heal on the next request.
 4. `retrieve()` on every use:
    - Embeds the query via LiteLLM (single text, single HTTP call — this is
-     the only per-draft network round-trip the KB adds).
+     the only per-draft network round-trip the KB adds). Provider errors
+     propagate.
    - Matmul + `argpartition` → top-K `ScoredChunk`s.
 5. `generate_reply` formats the hits as a `--- REFERENCE MATERIAL ---` block
    and appends them to the **user prompt** (not the system prompt, so they
    can be adjusted per email).
 6. LLM generates the draft; Gmail API creates it. The client sees a draft
-   that cites real agency facts.
+   grounded in real agency facts.
+
+If any step from 3 onward fails, `generate_reply` re-raises the exception and
+no draft is created. The caller (FastAPI handler or scanner loop) surfaces
+the error rather than producing a hallucinated reply.
 
 **Cost per reply** (Gemini, default settings, typical small corpus):
 
@@ -281,6 +296,31 @@ Drive. Any other answer — Airtable, Notion, a CMS, a git repo of Markdown —
 would be "please change your workflow for our tool's convenience." The code
 adapts to the business, not the other way round. `KB_RAG_FOLDER_IDS` accepts
 whatever folder structure already exists.
+
+### Why a yearly re-ingest cadence is fine
+
+This corpus is edited **roughly once a year** — the seasonal refresh of
+tour catalogs, prices, and policies. That single fact removes most of the
+operational anxiety usually associated with a RAG system:
+
+- **Staleness risk is tiny.** "When was the index built?" has a boring
+  answer for 11 months out of 12. We don't need a streaming pipeline, a
+  change-data-capture watcher on Drive, or a cache TTL — re-ingest on
+  the calendar matches how the data actually changes.
+- **Cost is a once-a-year line item.** The embedding API is the only
+  recurring cost the KB introduces, and "once a year × a few thousand
+  chunks" is rounding-error money. We don't need an embedding cache or
+  incremental ingest.
+- **Operational responsibility flips.** Instead of "is the daily ingest
+  Job healthy?" the operator question becomes "did this year's refresh
+  run after the seasonal Drive edits landed?" — a single calendar
+  reminder, not a continuous monitoring concern.
+
+The trade-off: **the yearly run must actually happen.** A scheduled
+Cloud Run Job (see the README) handles this on autopilot, and any
+out-of-cycle edit in Drive should trigger an on-demand `cli kb-ingest`
+so the next draft sees the change without waiting for the next yearly
+window.
 
 ### Why SQLite + numpy?
 
@@ -338,14 +378,22 @@ means a query matching the middle of a paragraph still gets surrounding
 context. The `chars // 4` token heuristic is coarse but retrieval doesn't
 need tokenizer precision — it needs chunks that are "roughly right."
 
-### Why fail soft, not fail fast, at runtime?
+### Why fail fast, not fail soft, at runtime?
 
-The draft-only invariant — never call `messages.send`, only
-`drafts.create` — means a bad draft is recoverable (staff review it). A
-failure to draft at all is not. Every KB error path (artifact missing,
-embedding API down, index corrupt, model mismatch) degrades to "reply without
-KB context" rather than "5xx the caller." Operators see warnings in logs;
-end users see a reasonable (if less specific) draft.
+Earlier iterations of this module degraded silently to the base prompt on
+KB failure. We changed that, because the agent's value proposition **is**
+grounded drafting — without RAG it's "any LLM with a Gmail token," which is
+not what the agency wants in front of customers. An ungrounded draft that
+staff send unmodified is a strictly worse outcome than no draft at all,
+because at least "no draft" tells staff to write the reply themselves.
+
+Every KB error path now raises `KBUnavailableError` (or propagates the
+underlying provider exception). The caller — `generate_reply`, then the
+FastAPI handler or scanner loop — surfaces the error. Operators see a clear
+"KB unavailable, run kb-ingest" message in logs and the response, fix the
+underlying issue, and the next request succeeds. The draft-only invariant is
+still sacred — refusing to draft does not violate it; producing an
+ungrounded one nearly does.
 
 ---
 
@@ -359,8 +407,9 @@ end users see a reasonable (if less specific) draft.
   tier covers typical volumes. GCS storage is cents per month.
 - **Atomic rebuilds.** One file swap = one KB update. Rollbacks are a
   gcloud one-liner (`gsutil cp gs://…/kb_index.sqlite.20260410 gs://…/kb_index.sqlite`).
-- **Fails soft.** No KB failure can block a draft. The agent still works
-  with the KB completely offline.
+- **Fails loud.** A misconfigured or stale KB cannot silently degrade
+  drafting quality — the API returns an error and operators get told to fix
+  it before any unreliable drafts can leak to customers.
 - **Drive-native.** Operators keep editing the same documents they always
   did. No migration, no parallel copy, no training.
 - **Inspectable.** `sqlite3 kb_index.sqlite` gives you a shell into the
@@ -457,19 +506,27 @@ and `retrieve.py`; the prompt-construction side of the KB never notices.
 
 ## Operational playbook
 
+**Refresh cadence.** The Drive material is edited **roughly once a year**
+(seasonal refresh of tour catalogs, prices, and policies). Schedule the
+ingest Job accordingly — a yearly Cloud Scheduler run after the agency's
+annual content review is sufficient, with on-demand `cli kb-ingest` runs
+for any out-of-cycle edits. Set a real calendar reminder for the yearly
+run; "we forgot" is the only realistic way this corpus goes stale.
+
 **Add content**: drop it in one of the `KB_RAG_FOLDER_IDS` folders in Drive.
-Trigger ingest (manually with `cli kb-ingest`, or let the next scheduled
-Cloud Run Job pick it up). Artifact re-uploads atomically. Next draft sees
-the new content after the next cold start, or on demand via a future
-`/admin/kb/reload` endpoint.
+Trigger ingest (manually with `cli kb-ingest`, or wait for the next yearly
+Cloud Run Job if the change can wait). Artifact re-uploads atomically. Next
+draft sees the new content after the next cold start, or on demand via a
+future `/admin/kb/reload` endpoint.
 
 **Remove content**: delete the file in Drive. Re-ingest. Gone.
 
 **Rotate embedding model**: change `KB_EMBEDDING_MODEL`. **Re-ingest first**,
 then update the runtime env. Between those two steps, runtime will detect
-the mismatch and disable retrieval with a loud warning — you do not get a
-subtle retrieval-quality regression, you get an explicit "retrieval is off
-until you ingest."
+the mismatch and refuse to draft with a loud `KBUnavailableError` — you do
+not get a subtle retrieval-quality regression, you get an explicit "the
+index doesn't match the configured model; re-run kb-ingest before any drafts
+will succeed."
 
 **Debug retrieval**: `uv run python -m wayonagio_email_agent.cli kb-search
 "the exact email text"` prints the top-K hits with scores and source paths.
@@ -497,11 +554,13 @@ Every module has unit tests in `tests/test_kb_*.py`. The high-signal ones:
 - `test_kb_ingest.py` — end-to-end with mocked Drive + mocked embeddings;
   covers the empty-RAG-index safety guard and the skip-on-extract-error
   path.
-- `test_kb_retrieve.py` — thread-safe cache, graceful degradation,
-  embedding-model mismatch detection.
+- `test_kb_retrieve.py` — thread-safe cache, fail-loud behavior on missing
+  artifact / embedding errors / model mismatch, and the no-poison guarantee
+  that failed loads aren't cached.
 - `test_llm.py::TestGenerateReplyKBIntegration` — wire-up tests that the
   reference block lands in the user prompt when hits exist, and that KB
-  failures never block drafting.
+  failures abort drafting (rather than silently producing an ungrounded
+  reply).
 
 The KB is designed for this test style: each module is import-cheap,
 does one thing, and has no hidden I/O on the happy path.

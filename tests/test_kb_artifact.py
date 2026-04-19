@@ -13,7 +13,6 @@ from wayonagio_email_agent.kb.config import KBConfig
 
 def _cfg(tmp_path: Path, *, gcs_uri: str = "") -> KBConfig:
     return KBConfig(
-        enabled=True,
         rag_folder_ids=("r",),
         rag_recursive=True,
         include_mime_types=("text/markdown",),

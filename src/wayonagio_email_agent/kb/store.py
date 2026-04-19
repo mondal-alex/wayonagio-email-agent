@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,7 +95,12 @@ def write_index(
     if path.exists():
         path.unlink()
 
-    with sqlite3.connect(path) as conn:
+    # ``contextlib.closing`` is mandatory: ``sqlite3.Connection.__exit__``
+    # commits the transaction but does NOT close the connection. Without it
+    # we leak a file descriptor every ingest, which Python eventually
+    # surfaces as ``ResourceWarning: unclosed database`` and which would
+    # exhaust ulimit on a long-running scanner over time.
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.executescript(_SCHEMA)
 
         conn.executemany(
@@ -190,7 +196,8 @@ class LoadedIndex:
 def load_index(path: str | Path) -> LoadedIndex:
     """Load an on-disk index into memory, L2-normalizing embeddings once."""
     path = Path(path)
-    with sqlite3.connect(path) as conn:
+    # See note in write_index: __exit__ doesn't close the sqlite3 handle.
+    with closing(sqlite3.connect(path)) as conn:
         meta_rows = dict(conn.execute("SELECT key, value FROM meta").fetchall())
         rows = conn.execute(
             """

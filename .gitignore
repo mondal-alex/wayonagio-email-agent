@@ -20,6 +20,15 @@ token.json
 # Scanner state
 scanner_state.db
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# KB local artifacts (default KB_LOCAL_DIR)
+kb_artifacts/
+
 # VSCode Settings
 .vscode
 

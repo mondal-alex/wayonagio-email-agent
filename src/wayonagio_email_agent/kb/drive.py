@@ -48,6 +48,18 @@ def _build_service() -> Any:
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def build_drive_service() -> Any:
+    """Public alias for :func:`_build_service`.
+
+    Exists so peer subsystems (notably ``exemplars.source``) can construct a
+    single Drive client once and reuse it across a fan-out of parallel reads
+    instead of re-authenticating per call. Keeping ``_build_service`` itself
+    private preserves the existing convention that internal helpers are
+    underscore-prefixed.
+    """
+    return _build_service()
+
+
 def list_folder(
     folder_id: str,
     *,

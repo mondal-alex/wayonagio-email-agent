@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from wayonagio_email_agent.kb import config as config_module
 from wayonagio_email_agent.kb import retrieve as kb_retrieve
@@ -13,7 +14,7 @@ from wayonagio_email_agent.kb.store import write_index
 
 
 def _enable_kb(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("KB_ENABLED", "true")
+    monkeypatch.setenv("KB_RAG_FOLDER_IDS", "rag-root")
     monkeypatch.setenv("KB_LOCAL_DIR", str(tmp_path))
     monkeypatch.setenv("KB_GCS_URI", "")
     monkeypatch.setenv("KB_EMBEDDING_MODEL", "fake/embed")
@@ -36,12 +37,6 @@ def _seed_artifacts(tmp_path: Path) -> None:
     )
 
 
-def test_returns_nothing_when_disabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("KB_ENABLED", "false")
-    kb_retrieve.reset_cache()
-    assert kb_retrieve.retrieve("machu picchu price") == []
-
-
 def test_retrieves_top_k(monkeypatch, tmp_path):
     _seed_artifacts(tmp_path)
     _enable_kb(monkeypatch, tmp_path)
@@ -58,7 +53,8 @@ def test_retrieves_top_k(monkeypatch, tmp_path):
     assert hits[0].score >= hits[1].score
 
 
-def test_retrieve_returns_empty_when_embedding_fails(monkeypatch, tmp_path, caplog):
+def test_retrieve_propagates_embedding_failures(monkeypatch, tmp_path):
+    """Embedding-API outages must not silently degrade to ungrounded drafts."""
     _seed_artifacts(tmp_path)
     _enable_kb(monkeypatch, tmp_path)
 
@@ -67,9 +63,8 @@ def test_retrieve_returns_empty_when_embedding_fails(monkeypatch, tmp_path, capl
 
     monkeypatch.setattr(kb_retrieve.embed, "embed_query", fake_embed_query)
 
-    caplog.set_level("WARNING")
-    assert kb_retrieve.retrieve("anything") == []
-    assert any("embedding failed" in rec.message for rec in caplog.records)
+    with pytest.raises(RuntimeError, match="no network"):
+        kb_retrieve.retrieve("anything")
 
 
 def test_format_reference_block_is_safe_for_empty():
@@ -92,16 +87,33 @@ def test_format_reference_block_includes_source_paths(monkeypatch, tmp_path):
     assert "Machu Picchu tour" in block
 
 
-def test_missing_artifacts_are_non_fatal(monkeypatch, tmp_path):
-    # KB enabled but no artifacts ingested yet — must not raise.
+def test_missing_artifacts_raise_loudly(monkeypatch, tmp_path):
+    """No artifact published yet → fail the draft, do not silently ungroound."""
     _enable_kb(monkeypatch, tmp_path)
-    # retrieve() needs to bail out before embedding because the index is empty.
-    # We don't patch embed here — if retrieve() mistakenly tried to embed we'd
-    # get a provider error, which would fail the test.
     monkeypatch.setenv("KB_EMBEDDING_MODEL", "gemini/text-embedding-004")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     kb_retrieve.reset_cache()
-    assert kb_retrieve.retrieve("x") == []
+
+    with pytest.raises(kb_retrieve.KBUnavailableError, match="kb-ingest"):
+        kb_retrieve.retrieve("x")
+
+
+def test_failed_load_is_not_cached(monkeypatch, tmp_path):
+    """Transient artifact-missing must not wedge the process forever."""
+    _enable_kb(monkeypatch, tmp_path)
+    kb_retrieve.reset_cache()
+
+    with pytest.raises(kb_retrieve.KBUnavailableError):
+        kb_retrieve.retrieve("x")
+
+    _seed_artifacts(tmp_path)
+    monkeypatch.setattr(
+        kb_retrieve.embed,
+        "embed_query",
+        lambda text, *, model: np.array([1.0, 0.0], dtype=np.float32),
+    )
+    hits = kb_retrieve.retrieve("x")
+    assert len(hits) == 2
 
 
 def test_reset_cache_forces_reload(monkeypatch, tmp_path):
@@ -119,28 +131,26 @@ def test_reset_cache_forces_reload(monkeypatch, tmp_path):
     (tmp_path / "kb_index.sqlite").unlink()
     kb_retrieve.reset_cache()
 
-    assert kb_retrieve.retrieve("x") == []
+    with pytest.raises(kb_retrieve.KBUnavailableError):
+        kb_retrieve.retrieve("x")
 
 
 def test_config_snapshot_matches_expectations(monkeypatch, tmp_path):
     _enable_kb(monkeypatch, tmp_path)
     cfg = config_module.load()
-    assert cfg.enabled is True
+    assert cfg.rag_folder_ids == ("rag-root",)
     assert cfg.local_dir == str(tmp_path)
     assert cfg.top_k == 2
 
 
-def test_index_is_dropped_when_embedding_model_mismatches(monkeypatch, tmp_path, caplog):
+def test_index_raises_when_embedding_model_mismatches(monkeypatch, tmp_path):
     """If KB_EMBEDDING_MODEL is rotated without re-ingest, the stored vectors
-    have the wrong dimension. Dropping the index here prevents a runtime
-    matmul crash on every draft."""
+    have the wrong dimension. Refusing here surfaces the misconfiguration
+    before it becomes a hallucinated draft."""
     _seed_artifacts(tmp_path)
     _enable_kb(monkeypatch, tmp_path)
     monkeypatch.setenv("KB_EMBEDDING_MODEL", "other/provider-model")
     kb_retrieve.reset_cache()
 
-    caplog.set_level("WARNING")
-    assert kb_retrieve.retrieve("anything") == []
-    assert any(
-        "Re-run `kb-ingest`" in rec.message for rec in caplog.records
-    ), "Operator must be told why retrieval went silent."
+    with pytest.raises(kb_retrieve.KBUnavailableError, match="Re-run `kb-ingest`"):
+        kb_retrieve.retrieve("anything")

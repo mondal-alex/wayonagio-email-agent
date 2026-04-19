@@ -223,12 +223,13 @@ class TestBuildReferences:
     def test_returns_message_id_when_chain_is_empty(self):
         assert _build_references("", "<c@x>") == "<c@x>"
 
-    def test_strips_surrounding_whitespace_from_existing_chain(self):
-        # The chain can come from a header with trailing whitespace; the final
-        # References line should still be well-formed.
-        result = _build_references("  <a@x>  ", "<b@x>")
-        assert result == "<a@x>   <b@x>"
-        assert result.strip() == result
+    def test_collapses_surrounding_and_internal_whitespace(self):
+        # The chain can come from a header with trailing whitespace OR with
+        # extra internal spaces between message IDs (line-folded headers,
+        # upstream reformatting). Collapse both so the outgoing References
+        # line is well-formed regardless of input shape.
+        result = _build_references("  <a@x>   <b@x>  ", "<c@x>")
+        assert result == "<a@x> <b@x> <c@x>"
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +318,42 @@ class TestScanOnce:
             scan_once(dry_run=False)
 
         assert mock_process.call_count == 2
+
+    def test_kb_unavailable_on_one_message_does_not_abort_pass(self):
+        """KBUnavailableError on a single message must be logged and the
+        scanner must move on to the next one. Otherwise a transient KB
+        outage would silently stall the entire batch.
+
+        Anchors the "log and continue" contract explicitly for the most
+        likely runtime exception now that the KB is required.
+        """
+        from wayonagio_email_agent.kb.retrieve import KBUnavailableError
+
+        processed: list[str] = []
+
+        def fake_process(message_id: str, dry_run: bool) -> None:
+            processed.append(message_id)
+            if message_id == "a":
+                raise KBUnavailableError(
+                    "KB index artifact could not be downloaded."
+                )
+
+        with (
+            patch(
+                "wayonagio_email_agent.agent.gmail_client.list_messages",
+                return_value=[{"id": "a"}, {"id": "b"}],
+            ),
+            patch(
+                "wayonagio_email_agent.agent._process_message",
+                side_effect=fake_process,
+            ),
+        ):
+            scan_once(dry_run=False)
+
+        assert processed == ["a", "b"], (
+            "scan_once aborted after KBUnavailableError on the first message; "
+            "the batch must be resilient to per-message KB failures."
+        )
 
 
 # ---------------------------------------------------------------------------

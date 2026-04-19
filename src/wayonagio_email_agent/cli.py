@@ -8,6 +8,7 @@ Usage:
   uv run python -m wayonagio_email_agent.cli scan-once [--dry-run]
   uv run python -m wayonagio_email_agent.cli kb-ingest
   uv run python -m wayonagio_email_agent.cli kb-search <query> [--top-k N]
+  uv run python -m wayonagio_email_agent.cli exemplar-list
 """
 
 from __future__ import annotations
@@ -77,8 +78,24 @@ def list_emails(max_results: int, query: str) -> None:
 def draft_reply(message_id: str) -> None:
     """Create a draft reply for MESSAGE_ID."""
     from wayonagio_email_agent import agent
+    from wayonagio_email_agent.kb.config import KBConfigError
+    from wayonagio_email_agent.kb.retrieve import KBUnavailableError
+    from wayonagio_email_agent.llm.client import EmptyReplyError
 
-    draft = agent.manual_draft_flow(message_id)
+    # Translate the same expected runtime errors that the API maps to
+    # 503/502 into clean ClickExceptions. Without this, operators running
+    # the CLI to debug a Gmail thread see a Python traceback instead of an
+    # actionable one-line error pointing at kb-ingest / the LLM provider.
+    try:
+        draft = agent.manual_draft_flow(message_id)
+    except (KBUnavailableError, KBConfigError) as exc:
+        raise click.ClickException(
+            f"Knowledge base unavailable: {exc} Run `kb-ingest` and try again."
+        )
+    except EmptyReplyError as exc:
+        raise click.ClickException(
+            f"LLM returned an empty reply: {exc} Check the LLM provider config and retry."
+        )
     click.echo(f"Draft created: {draft.get('id')}")
 
 
@@ -164,10 +181,20 @@ def kb_search(query: str, top_k: int) -> None:
     Useful for sanity-checking a fresh ingest before a draft goes out.
     """
     from wayonagio_email_agent.kb import retrieve as kb_retrieve
+    from wayonagio_email_agent.kb.config import KBConfigError
+    from wayonagio_email_agent.kb.retrieve import KBUnavailableError
 
-    hits = kb_retrieve.retrieve(query, top_k=top_k)
+    # The KB is required: a missing artifact, mismatched embedding model, or
+    # unset KB_RAG_FOLDER_IDS raises rather than returning []. Translate to a
+    # ClickException so the operator sees a clean one-line error and a
+    # non-zero exit code instead of a Python traceback.
+    try:
+        hits = kb_retrieve.retrieve(query, top_k=top_k)
+    except (KBUnavailableError, KBConfigError) as exc:
+        raise click.ClickException(str(exc))
+
     if not hits:
-        click.echo("No results. Is KB_ENABLED=true and has kb-ingest been run?")
+        click.echo("No matches above similarity threshold.")
         return
 
     for i, hit in enumerate(hits, 1):
@@ -175,6 +202,51 @@ def kb_search(query: str, top_k: int) -> None:
         preview = hit.text.replace("\n", " ")
         if len(preview) > 240:
             preview = preview[:237] + "..."
+        click.echo(f"    {preview}")
+
+
+@cli.command(name="exemplar-list")
+@click.option(
+    "--preview-chars",
+    default=200,
+    show_default=True,
+    help="How many characters of each exemplar body to print as a preview.",
+)
+def exemplar_list(preview_chars: int) -> None:
+    """List the curator-managed exemplars the agent will inject into prompts.
+
+    A sanity-check command: confirms what exemplar Docs the runtime sees
+    after sanitization, in the order they will appear in the EXAMPLE
+    RESPONSES block. Useful for verifying that a curator's edit landed and
+    that PII redaction is doing its job before drafts go out.
+
+    Mirrors the contract of ``kb-search``: any unexpected exception is
+    translated to a clean ``click.ClickException`` so the operator sees a
+    one-line error and a non-zero exit code instead of a Python traceback.
+    The loader itself never raises, but bypassing it here (we read the
+    cache directly via ``get_all_exemplars``) keeps the failure-handling
+    surface narrow.
+    """
+    from wayonagio_email_agent.exemplars import loader as exemplar_loader
+
+    try:
+        exemplars = exemplar_loader.get_all_exemplars()
+    except Exception as exc:  # noqa: BLE001 — defensive: loader is contracted not to raise
+        raise click.ClickException(f"Could not load exemplars: {exc}")
+
+    if not exemplars:
+        click.echo(
+            "No exemplars loaded. Either KB_EXEMPLAR_FOLDER_IDS is unset, "
+            "the configured Drive folder is empty, or the cold-start load "
+            "failed (check logs for WARNING)."
+        )
+        return
+
+    for index, exemplar in enumerate(exemplars, start=1):
+        preview = exemplar.text.replace("\n", " ")
+        if len(preview) > preview_chars:
+            preview = preview[: max(0, preview_chars - 3)] + "..."
+        click.echo(f"[{index}] {exemplar.title}  (id={exemplar.source_id})")
         click.echo(f"    {preview}")
 
 

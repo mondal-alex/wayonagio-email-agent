@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 
 # Note: `.env` is loaded by the entry points (api.py, cli.py). Library modules
@@ -31,30 +32,55 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+# Cache of DB paths we've already verified the schema for. Keyed by path so a
+# test that swaps SCANNER_STATE_DB via monkeypatch still re-runs the migration
+# against the new file. Using a set rather than a single bool keeps the schema
+# check correct under concurrent test files that touch different DBs.
+_schema_verified: set[str] = set()
+
 
 def _db_path() -> str:
     return os.environ.get("SCANNER_STATE_DB", "scanner_state.db")
 
 
 def _get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_path())
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS processed_messages (
-            message_id   TEXT PRIMARY KEY,
-            outcome      TEXT NOT NULL DEFAULT 'drafted',
-            processed_at TEXT NOT NULL
-        )
-        """
-    )
-    columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(processed_messages)").fetchall()
-    }
-    if "outcome" not in columns:
+    """Return a fresh sqlite3 connection with the schema verified.
+
+    Callers MUST close the returned connection (use ``contextlib.closing`` or
+    a try/finally) — sqlite3.Connection's ``__exit__`` only commits/rolls back
+    the transaction, it does NOT close the connection, which would slowly
+    leak file descriptors in the long-running scanner.
+    """
+    path = _db_path()
+    conn = sqlite3.connect(path)
+    if path in _schema_verified:
+        return conn
+    try:
         conn.execute(
-            "ALTER TABLE processed_messages ADD COLUMN outcome TEXT NOT NULL DEFAULT 'drafted'"
+            """
+            CREATE TABLE IF NOT EXISTS processed_messages (
+                message_id   TEXT PRIMARY KEY,
+                outcome      TEXT NOT NULL DEFAULT 'drafted',
+                processed_at TEXT NOT NULL
+            )
+            """
         )
-    conn.commit()
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(processed_messages)"
+            ).fetchall()
+        }
+        if "outcome" not in columns:
+            conn.execute(
+                "ALTER TABLE processed_messages "
+                "ADD COLUMN outcome TEXT NOT NULL DEFAULT 'drafted'"
+            )
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
+    _schema_verified.add(path)
     return conn
 
 
@@ -65,7 +91,7 @@ def is_processed(message_id: str) -> bool:
 
 def get_outcome(message_id: str) -> str | None:
     """Return the stored scanner outcome for *message_id*, if any."""
-    with _get_connection() as conn:
+    with closing(_get_connection()) as conn, conn:
         row = conn.execute(
             "SELECT outcome FROM processed_messages WHERE message_id = ?",
             (message_id,),
@@ -76,7 +102,7 @@ def get_outcome(message_id: str) -> str | None:
 def mark_processed(message_id: str, outcome: str = "drafted") -> None:
     """Persist a scanner outcome for *message_id* with the current UTC time."""
     now = datetime.now(timezone.utc).isoformat()
-    with _get_connection() as conn:
+    with closing(_get_connection()) as conn, conn:
         conn.execute(
             """
             INSERT INTO processed_messages (message_id, outcome, processed_at)

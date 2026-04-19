@@ -65,11 +65,19 @@ def _parse_bool(raw: str, *, default: bool) -> bool:
 # Public config object
 # ---------------------------------------------------------------------------
 
+class KBConfigError(RuntimeError):
+    """Raised when required KB environment variables are missing or invalid.
+
+    The KB is no longer optional: an agent without grounding has no business
+    drafting customer replies, so we fail loudly at startup instead of silently
+    producing ungrounded drafts.
+    """
+
+
 @dataclass(frozen=True)
 class KBConfig:
     """Snapshot of KB configuration resolved from the environment."""
 
-    enabled: bool
     rag_folder_ids: tuple[str, ...]
     rag_recursive: bool
     include_mime_types: tuple[str, ...]
@@ -88,10 +96,18 @@ def load() -> KBConfig:
 
     Re-reads ``os.environ`` on every call so tests (and live config changes on
     long-lived processes) are reflected without import-time caching surprises.
-    """
-    enabled = _parse_bool(os.environ.get("KB_ENABLED", ""), default=False)
 
+    Raises :class:`KBConfigError` if ``KB_RAG_FOLDER_IDS`` is missing or empty
+    — without RAG content, the agent cannot ground replies in agency facts and
+    must refuse to draft rather than hallucinate.
+    """
     rag_ids = tuple(_parse_csv_folder_ids(os.environ.get("KB_RAG_FOLDER_IDS", "")))
+    if not rag_ids:
+        raise KBConfigError(
+            "KB_RAG_FOLDER_IDS is required. Set it to a comma-separated list of "
+            "Drive folder IDs or share URLs containing the agency's tour "
+            "descriptions, FAQs, and templates."
+        )
 
     mime_raw = os.environ.get("KB_INCLUDE_MIME_TYPES", "")
     if mime_raw.strip():
@@ -106,7 +122,6 @@ def load() -> KBConfig:
         top_k = 4
 
     return KBConfig(
-        enabled=enabled,
         rag_folder_ids=rag_ids,
         rag_recursive=_parse_bool(
             os.environ.get("KB_RAG_RECURSIVE", ""), default=True

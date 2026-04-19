@@ -7,6 +7,7 @@ from email import message_from_bytes
 from unittest.mock import Mock, patch
 
 import pytest
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 from wayonagio_email_agent import gmail_client
@@ -353,3 +354,184 @@ class TestMessageParsing:
         assert parts["thread_id"] == "thread-9"
         assert parts["message_id_header"] == "<msg-9@example.com>"
         assert parts["references"] == "<old@example.com>"
+
+
+class TestLoadCredentials:
+    """OAuth credential loading anchors the API's 503 contract.
+
+    `manual_draft_flow` -> `_build_service` -> `load_credentials`. If
+    `load_credentials` ever stops raising `SystemExit` on auth failures, the
+    api.py 503 mapping silently turns into a 500. These tests freeze the
+    contract.
+    """
+
+    def test_returns_valid_credentials_directly(self, monkeypatch, tmp_path):
+        token_path = tmp_path / "token.json"
+        token_path.write_text("{}")
+        monkeypatch.setenv("GMAIL_TOKEN_PATH", str(token_path))
+
+        creds = Mock()
+        creds.valid = True
+
+        with patch(
+            "wayonagio_email_agent.gmail_client.Credentials.from_authorized_user_file",
+            return_value=creds,
+        ):
+            result = gmail_client.load_credentials()
+
+        assert result is creds
+
+    def test_refreshes_expired_token_and_persists(self, monkeypatch, tmp_path):
+        token_path = tmp_path / "token.json"
+        token_path.write_text("{}")
+        monkeypatch.setenv("GMAIL_TOKEN_PATH", str(token_path))
+
+        creds = Mock()
+        creds.valid = False
+        creds.expired = True
+        creds.refresh_token = "refresh-abc"
+        creds.to_json.return_value = '{"refreshed": true}'
+
+        def _refresh(_request):
+            creds.valid = True
+
+        creds.refresh.side_effect = _refresh
+
+        with patch(
+            "wayonagio_email_agent.gmail_client.Credentials.from_authorized_user_file",
+            return_value=creds,
+        ):
+            result = gmail_client.load_credentials()
+
+        assert result is creds
+        creds.refresh.assert_called_once()
+        # Token must be re-persisted after refresh so the new access token
+        # survives the next process restart.
+        assert token_path.read_text() == '{"refreshed": true}'
+
+    def test_systemexit_when_refresh_fails(self, monkeypatch, tmp_path):
+        """Locks the API contract: a refresh failure must raise SystemExit
+        so api.py can map it to HTTP 503."""
+        token_path = tmp_path / "token.json"
+        token_path.write_text("{}")
+        monkeypatch.setenv("GMAIL_TOKEN_PATH", str(token_path))
+
+        creds = Mock()
+        creds.valid = False
+        creds.expired = True
+        creds.refresh_token = "refresh-abc"
+        creds.refresh.side_effect = RefreshError("token revoked")
+
+        with patch(
+            "wayonagio_email_agent.gmail_client.Credentials.from_authorized_user_file",
+            return_value=creds,
+        ):
+            with pytest.raises(SystemExit):
+                gmail_client.load_credentials()
+
+    def test_systemexit_when_token_missing(self, monkeypatch, tmp_path):
+        token_path = tmp_path / "missing.json"
+        monkeypatch.setenv("GMAIL_TOKEN_PATH", str(token_path))
+
+        with pytest.raises(SystemExit):
+            gmail_client.load_credentials()
+
+    def test_systemexit_when_token_present_but_unrefreshable(
+        self, monkeypatch, tmp_path
+    ):
+        """Token file exists but creds are invalid AND not refreshable
+        (no refresh_token). Must still hard-exit."""
+        token_path = tmp_path / "token.json"
+        token_path.write_text("{}")
+        monkeypatch.setenv("GMAIL_TOKEN_PATH", str(token_path))
+
+        creds = Mock()
+        creds.valid = False
+        creds.expired = False
+        creds.refresh_token = None
+
+        with patch(
+            "wayonagio_email_agent.gmail_client.Credentials.from_authorized_user_file",
+            return_value=creds,
+        ):
+            with pytest.raises(SystemExit):
+                gmail_client.load_credentials()
+
+
+class TestListMessages:
+    def test_returns_message_list(self):
+        service = Mock()
+        service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+            "messages": [{"id": "m1"}, {"id": "m2"}],
+        }
+
+        with patch(
+            "wayonagio_email_agent.gmail_client._build_service",
+            return_value=service,
+        ):
+            result = gmail_client.list_messages(q="is:unread", max_results=20)
+
+        assert result == [{"id": "m1"}, {"id": "m2"}]
+        service.users.return_value.messages.return_value.list.assert_called_once_with(
+            userId="me", q="is:unread", maxResults=20
+        )
+
+    def test_returns_empty_list_when_no_messages_key(self):
+        service = Mock()
+        service.users.return_value.messages.return_value.list.return_value.execute.return_value = {}
+
+        with patch(
+            "wayonagio_email_agent.gmail_client._build_service",
+            return_value=service,
+        ):
+            result = gmail_client.list_messages()
+
+        assert result == []
+
+    def test_propagates_http_error(self):
+        service = Mock()
+        service.users.return_value.messages.return_value.list.return_value.execute.side_effect = HttpError(
+            resp=Mock(status=500, reason="boom"),
+            content=b"failed",
+        )
+
+        with patch(
+            "wayonagio_email_agent.gmail_client._build_service",
+            return_value=service,
+        ):
+            with pytest.raises(HttpError):
+                gmail_client.list_messages()
+
+
+class TestGetMessage:
+    def test_returns_full_message_payload(self):
+        service = Mock()
+        service.users.return_value.messages.return_value.get.return_value.execute.return_value = {
+            "id": "m1",
+            "payload": {},
+        }
+
+        with patch(
+            "wayonagio_email_agent.gmail_client._build_service",
+            return_value=service,
+        ):
+            result = gmail_client.get_message("m1")
+
+        assert result["id"] == "m1"
+        service.users.return_value.messages.return_value.get.assert_called_once_with(
+            userId="me", id="m1", format="full"
+        )
+
+    def test_propagates_http_error(self):
+        service = Mock()
+        service.users.return_value.messages.return_value.get.return_value.execute.side_effect = HttpError(
+            resp=Mock(status=404, reason="Not Found"),
+            content=b"missing",
+        )
+
+        with patch(
+            "wayonagio_email_agent.gmail_client._build_service",
+            return_value=service,
+        ):
+            with pytest.raises(HttpError):
+                gmail_client.get_message("m1")

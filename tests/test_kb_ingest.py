@@ -14,7 +14,6 @@ from wayonagio_email_agent.kb.store import load_index
 
 def _cfg(tmp_path, *, rag_ids=("rag-root",)) -> KBConfig:
     return KBConfig(
-        enabled=True,
         rag_folder_ids=rag_ids,
         rag_recursive=True,
         include_mime_types=("text/markdown", "application/pdf"),
@@ -88,24 +87,8 @@ def test_ingest_writes_index(monkeypatch, tmp_path):
     assert "Machu Picchu" in " ".join(loaded.texts) + " " + " ".join(loaded.source_paths)
 
 
-def test_ingest_refuses_when_disabled(tmp_path):
-    cfg = KBConfig(
-        enabled=False,
-        rag_folder_ids=("r",),
-        rag_recursive=True,
-        include_mime_types=("text/markdown",),
-        embedding_model="x/y",
-        gcs_uri="",
-        local_dir=str(tmp_path),
-        top_k=4,
-    )
-    with pytest.raises(RuntimeError, match="KB_ENABLED"):
-        ingest.run(config=cfg)
-
-
 def test_ingest_refuses_when_no_rag_folders_configured(tmp_path):
     cfg = KBConfig(
-        enabled=True,
         rag_folder_ids=(),
         rag_recursive=True,
         include_mime_types=("text/markdown",),
@@ -134,10 +117,48 @@ def test_ingest_refuses_to_publish_empty_index_when_rag_configured(
     cfg = _cfg(tmp_path, rag_ids=("rag-root",))
     caplog.set_level("WARNING")
 
-    with pytest.raises(RuntimeError, match="zero usable RAG sources"):
+    with pytest.raises(RuntimeError, match="unusable index"):
         ingest.run(config=cfg, service=object())
 
     # And critically: no artifacts should have landed on disk.
+    assert not (tmp_path / "artifacts" / "kb_index.sqlite").exists()
+
+
+def test_ingest_refuses_to_publish_when_chunker_returns_no_chunks(
+    monkeypatch, tmp_path
+):
+    """Regression guard: a file whose extracted text passes ``text.strip()``
+    but produces zero chunks (e.g. whitespace-only paragraphs after extraction)
+    must NOT result in an empty index being published. Without this, the
+    previous good index is silently overwritten and every reply afterwards
+    fails with KBUnavailableError("KB index ... is empty")."""
+    rag_files = [
+        drive_module.DriveFile(
+            id="r1",
+            name="weird.md",
+            mime_type="text/markdown",
+            path="root / weird.md",
+            modified_time="t",
+        ),
+    ]
+    _patch_drive(
+        monkeypatch,
+        files_by_folder={"rag-root": rag_files},
+        payloads={"r1": b"some real text"},
+    )
+    _patch_embed(monkeypatch)
+
+    # Force the chunker to drop every chunk even though extraction succeeded.
+    monkeypatch.setattr(
+        "wayonagio_email_agent.kb.ingest.chunk_text",
+        lambda text, **_kw: [],
+    )
+
+    cfg = _cfg(tmp_path, rag_ids=("rag-root",))
+    with pytest.raises(RuntimeError, match="unusable index"):
+        ingest.run(config=cfg, service=object())
+
+    # Critically: nothing should have landed on disk.
     assert not (tmp_path / "artifacts" / "kb_index.sqlite").exists()
 
 
