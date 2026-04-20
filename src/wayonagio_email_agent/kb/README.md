@@ -136,9 +136,25 @@ Mirrors the design of `llm/client.py` exactly: provider-agnostic via LiteLLM,
 provider-specific kwargs only when they apply (`api_base` for Ollama,
 `api_key` for Gemini with a clear error if `GEMINI_API_KEY` is missing).
 
-Batches default to **64 texts per request**. Every embedding provider accepts
-batched input and it's dramatically cheaper in latency (one RTT per batch) and
-in dollars (many providers price per-request rather than per-token).
+Batch size is **provider-aware**:
+
+- **Gemini** (`gemini-embedding-001`) — default 4 chunks per request, 3-second
+  pace between batches. The synchronous `batchEmbedContents` endpoint LiteLLM
+  uses is not even in the model's `supportedGenerationMethods` list (only
+  `embedContent` and `asyncBatchEmbedContent` are), so its rate budget is
+  tight. Combined with the free-tier caps (≈100 RPM / 30k TPM / 1000 RPD),
+  a naive 64-chunk batch on a real yearly corpus reliably 429s because the
+  request alone exceeds TPM. Smaller batches + pacing stay well under the
+  cap. Paid-tier users can raise `KB_EMBED_BATCH_SIZE` and zero out
+  `KB_EMBED_INTER_BATCH_SECONDS` for faster ingest.
+- **Ollama / other self-hosted** — default 64 per request, no pacing. No
+  rate limit; batching is pure throughput.
+
+On top of batching, `embed_texts` **retries 429s** with exponential backoff
+(5s → 60s cap, configurable via `KB_EMBED_MAX_RETRIES`). Other errors (auth,
+invalid model, bad input) fail fast — retrying them just delays the
+inevitable. The retry exists to survive a transient quota burst, **not** to
+mask a request that's structurally over-budget; that's what batch size is for.
 
 Defensive response parsing: LiteLLM usually returns an `EmbeddingResponse`
 with a `.data` attribute, but some providers wrap it as a plain dict, and a
