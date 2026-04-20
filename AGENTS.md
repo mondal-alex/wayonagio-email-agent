@@ -4,7 +4,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 
 For a system-level technical writeup of how the codebase is wired together (module
 contracts, the three flows, cross-cutting concerns, and the load-bearing invariants),
-read [`ARCHITECTURE.md`](ARCHITECTURE.md) first. This file stays brief on purpose so
+read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) first. This file stays brief on purpose so
 agents can load it as quick context.
 
 ## Project Overview

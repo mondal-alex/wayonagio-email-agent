@@ -3,10 +3,10 @@
 Technical writeup of how this codebase is wired together and *why* it looks
 the way it does. Companion to:
 
-- [`README.md`](README.md) — user/operator setup, deployment, and security posture.
-- [`AGENTS.md`](AGENTS.md) — quick orientation for AI coding agents.
-- [`src/wayonagio_email_agent/kb/README.md`](src/wayonagio_email_agent/kb/README.md) — deep dive on the knowledge base module specifically.
-- [`src/wayonagio_email_agent/exemplars/README.md`](src/wayonagio_email_agent/exemplars/README.md) — deep dive on the exemplars module specifically.
+- [`README.md`](../README.md) — user/operator setup, deployment, and security posture.
+- [`AGENTS.md`](../AGENTS.md) — quick orientation for AI coding agents.
+- [`src/wayonagio_email_agent/kb/README.md`](../src/wayonagio_email_agent/kb/README.md) — deep dive on the knowledge base module specifically.
+- [`src/wayonagio_email_agent/exemplars/README.md`](../src/wayonagio_email_agent/exemplars/README.md) — deep dive on the exemplars module specifically.
 
 If a topic is well-covered in one of those, this document refers out instead
 of duplicating. The goal here is the *system-level* story: who calls whom,
@@ -181,7 +181,7 @@ artifact.upload_artifact(...)               ── GCS or KB_LOCAL_DIR
 ```
 
 Why ingest and runtime live in the **same package** but communicate **only
-through the artifact**: see [`kb/README.md` §"Why an artifact boundary?"](src/wayonagio_email_agent/kb/README.md).
+through the artifact**: see [`kb/README.md` §"Why an artifact boundary?"](../src/wayonagio_email_agent/kb/README.md).
 Short version: write-once-read-many, atomic deploy, runtime never touches
 Drive.
 
@@ -335,7 +335,7 @@ process-local set. Warm reads skip the migration entirely.
 ### `kb/`
 
 Required RAG layer. Architecture in detail in
-[`kb/README.md`](src/wayonagio_email_agent/kb/README.md). Summary of the
+[`kb/README.md`](../src/wayonagio_email_agent/kb/README.md). Summary of the
 modules and how they wire to the rest of the system:
 
 | Module | Side | Wired to |
@@ -366,7 +366,7 @@ fallback to ungrounded replies.
 Optional, graceful, curator-led companion to the KB. Sets the agency's
 **voice** (style, structure, tone) the way the KB sets its **facts**.
 Architecture in detail in
-[`exemplars/README.md`](src/wayonagio_email_agent/exemplars/README.md).
+[`exemplars/README.md`](../src/wayonagio_email_agent/exemplars/README.md).
 Summary of the modules and how they wire to the rest of the system:
 
 | Module | Side | Wired to |
@@ -642,7 +642,7 @@ you remember the constraint:
   numpy matmul against an L2-normalized matrix loaded into RAM beats any
   hosted vector DB on latency and cost. When the corpus grows past
   ~50k chunks the upgrade path is documented in
-  [`kb/README.md`](src/wayonagio_email_agent/kb/README.md).
+  [`kb/README.md`](../src/wayonagio_email_agent/kb/README.md).
 
 - **Provider-agnostic LLM via LiteLLM.** The agency might stay on Gemini
   Flash for years or might switch to a self-hosted model overnight.
