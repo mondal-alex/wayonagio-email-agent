@@ -15,14 +15,16 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from wayonagio_email_agent.kb.config import (
+    DEFAULT_INCLUDE_MIME_TYPES as _KB_DEFAULT_INCLUDE_MIME_TYPES,
+)
 from wayonagio_email_agent.kb.config import parse_folder_id
 
-DEFAULT_INCLUDE_MIME_TYPES = (
-    "application/pdf",
-    "application/vnd.google-apps.document",
-    "text/plain",
-    "text/markdown",
-)
+# Re-exported under the exemplars namespace so callers (and tests) that reach
+# for ``exemplars.config.DEFAULT_INCLUDE_MIME_TYPES`` keep working, but the
+# single source of truth lives in ``kb.config`` — the two pools (KB and
+# exemplars) read the same document universe out of Drive and must not drift.
+DEFAULT_INCLUDE_MIME_TYPES = _KB_DEFAULT_INCLUDE_MIME_TYPES
 
 
 def _parse_csv_folder_ids(raw: str) -> list[str]:

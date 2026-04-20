@@ -25,7 +25,6 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
 
 from wayonagio_email_agent import agent
 from wayonagio_email_agent.exemplars import loader as exemplar_loader
@@ -94,9 +93,6 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Attach a small set of defensive response headers to every response."""
-
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)

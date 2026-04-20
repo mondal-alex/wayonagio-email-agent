@@ -248,6 +248,13 @@ uv run python -m wayonagio_email_agent.cli kb-ingest
 
 # Debug retrieval for a query
 uv run python -m wayonagio_email_agent.cli kb-search "how much is Machu Picchu?"
+
+# One-shot KB health check: is the artifact present, what's in it,
+# when was it last ingested, does the embedding model match?
+uv run python -m wayonagio_email_agent.cli kb-doctor
+
+# List the exemplars the runtime has cached (post-sanitization).
+uv run python -m wayonagio_email_agent.cli exemplar-list
 ```
 
 ### Knowledge base (required)
@@ -277,55 +284,19 @@ Environment variables (see [.env.example](.env.example) for the full list):
 
 **Cadence.** The agency edits this material roughly **once a year** (the seasonal refresh of tour catalogs, prices, and policies). That's a strong feature: the KB has near-zero risk of going stale between updates, and re-ingest costs (embedding API calls + GCS write) are essentially a once-a-year line item rather than a recurring expense. The flip side is operational: **schedule a yearly re-ingest** and treat it as a calendar reminder, not a daily background job. Any content edit out of cycle should also trigger an on-demand `cli kb-ingest` so the next draft sees it.
 
-**Cloud Run deployment.** The ingest pipeline runs as a **Cloud Run Job** triggered by **Cloud Scheduler** on whatever cadence fits your content's churn rate. For this agency, **once a year** matches how often the source documents actually change. The Job container entrypoint is `python -m wayonagio_email_agent.cli kb-ingest`. Grant its service account:
-
-- `roles/storage.objectAdmin` on the bucket behind `KB_GCS_URI`.
-- `roles/secretmanager.secretAccessor` on the same secrets as the API (Gmail/Drive token, Gemini key, bearer token — reuse the existing service account if you prefer).
-
-The API service additionally needs `roles/storage.objectViewer` on that bucket so its cold-start artifact download works. Give the service account access to the artifact bucket and Cloud Run will transparently download `kb_index.sqlite` on the first draft after a cold start.
-
-Example one-off deploy commands:
-
-```bash
-# Build the ingest Job (reuses the same image as the API)
-IMG="us-central1-docker.pkg.dev/$(gcloud config get-value project)/wayonagio/email-agent:latest"
-
-gcloud run jobs create wayonagio-kb-ingest \
-  --image="$IMG" \
-  --region=us-central1 \
-  --service-account="wayonagio-run@$(gcloud config get-value project).iam.gserviceaccount.com" \
-  --command="python" \
-  --args="-m,wayonagio_email_agent.cli,kb-ingest" \
-  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids>,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json \
-  --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest,GEMINI_API_KEY=gemini-api-key:latest \
-  --set-secrets=/secrets/credentials.json=gmail-credentials:latest,/secrets/token.json=gmail-token:latest
-
-# Schedule it (yearly on Jan 15 at 04:15 UTC — the agency refreshes its
-# tour catalog, prices, and policies annually). Run `cli kb-ingest`
-# on-demand whenever an out-of-cycle edit lands in Drive.
-gcloud scheduler jobs create http wayonagio-kb-ingest-yearly \
-  --location=us-central1 \
-  --schedule="15 4 15 1 *" \
-  --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$(gcloud config get-value project)/jobs/wayonagio-kb-ingest:run" \
-  --http-method=POST \
-  --oauth-service-account-email="wayonagio-run@$(gcloud config get-value project).iam.gserviceaccount.com"
-```
-
-After the first successful ingest, point the API service at the same artifact:
-
-```bash
-gcloud run services update wayonagio-email-agent \
-  --region=us-central1 \
-  --update-env-vars=KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids>
-```
-
-The API will start serving drafts grounded in the freshly-ingested corpus on its next cold start. Until the first ingest completes, draft requests fail loudly — that is intentional, since an ungrounded draft is worse than a deferred one.
+**Cloud Run deployment.** In production the ingest pipeline runs as a **Cloud Run Job** triggered by **Cloud Scheduler** on a yearly cadence that matches the agency's editorial rhythm. The full command sequence (bucket + Job + scheduler + first manual run + verification with `kb-doctor`) lives in [Recommended deployment: Cloud Run + Gemini / step 5](#5-populate-the-knowledge-base) so the deploy story reads top-to-bottom in one place. The Job entrypoint is `python -m wayonagio_email_agent.cli kb-ingest`; its service account needs `roles/storage.objectAdmin` on the `KB_GCS_URI` bucket and `roles/secretmanager.secretAccessor` on the same secrets as the API service. Reuse the API's service account unless you have a reason to split them.
 
 You can sanity-check retrieval without ever sending an email:
 
 ```bash
+# High-level: is the KB healthy? What does it think it has indexed?
+uv run python -m wayonagio_email_agent.cli kb-doctor
+
+# Low-level: what chunks does retrieval return for a realistic question?
 uv run python -m wayonagio_email_agent.cli kb-search "inca trail permit availability"
 ```
+
+`kb-doctor` is the one command to reach for when drafts start 503-ing. It reports artifact presence, ingest timestamp and age, chunk count, per-source chunk breakdown, the embedding model the index was built with (and whether it matches the runtime), and the size of the exemplar pool. Exits non-zero on any hard failure (missing artifact, empty index, embedding-model mismatch), which makes it safe to wire into a deploy smoke-test step or a readiness probe.
 
 ### Exemplars (optional)
 
@@ -408,6 +379,20 @@ gcloud artifacts repositories create wayonagio \
   --location=us-central1
 ```
 
+Create the GCS bucket that will hold the knowledge-base artifact. The API service and the ingest Job both read/write `kb_index.sqlite` here, so this is a hard prerequisite:
+
+```bash
+gcloud storage buckets create gs://wayonagio-kb \
+  --location=us-central1 \
+  --uniform-bucket-level-access
+```
+
+Also enable the storage API alongside the others:
+
+```bash
+gcloud services enable storage.googleapis.com
+```
+
 ### 2. Store secrets in Secret Manager
 
 The container must **not** contain `credentials.json`, `token.json`, `AUTH_BEARER_TOKEN`, or `GEMINI_API_KEY`. Put them in Secret Manager instead.
@@ -445,6 +430,14 @@ for secret in gmail-credentials gmail-token auth-bearer-token gemini-api-key; do
 done
 ```
 
+Grant the service account access to the KB bucket. The ingest Job writes `kb_index.sqlite`; the API service reads it at cold start. One service account covers both because neither role conflicts with the other — and running one service account is easier to audit than two.
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://wayonagio-kb \
+  --member="serviceAccount:${SA}" \
+  --role="roles/storage.objectAdmin"
+```
+
 ### 3. Build and push the image
 
 ```bash
@@ -458,6 +451,9 @@ gcloud builds submit \
 SA="wayonagio-run@$(gcloud config get-value project).iam.gserviceaccount.com"
 IMG="us-central1-docker.pkg.dev/$(gcloud config get-value project)/wayonagio/email-agent:latest"
 
+Replace the `<rag-folder-ids>` placeholder with the comma-separated Drive folder IDs (or share URLs) that hold the agency's tour descriptions, FAQs, and templates. The KB is required — the service will return `503 Knowledge base unavailable` on every draft until `KB_RAG_FOLDER_IDS` is set and a `kb-ingest` run has published `kb_index.sqlite` to `gs://wayonagio-kb` (step 5 below).
+
+```bash
 gcloud run deploy wayonagio-email-agent \
   --image="$IMG" \
   --region=us-central1 \
@@ -467,26 +463,87 @@ gcloud run deploy wayonagio-email-agent \
   --min-instances=0 \
   --max-instances=2 \
   --cpu=1 --memory=512Mi \
-  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json,SCANNER_ENABLED=false,LOG_LEVEL=INFO \
+  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json,SCANNER_ENABLED=false,LOG_LEVEL=INFO,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids> \
   --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest,GEMINI_API_KEY=gemini-api-key:latest \
   --set-secrets=/secrets/credentials.json=gmail-credentials:latest,/secrets/token.json=gmail-token:latest
 ```
 
 Notes:
 - `--allow-unauthenticated` is required because the Gmail Add-on can't attach a Google-IAM identity token. **Authentication is still enforced**: every request must carry `Authorization: Bearer $AUTH_BEARER_TOKEN`.
-- `--min-instances=0` means the service scales to zero when idle and you pay nothing; cold-start adds ~1–2s on the first request. Set `--min-instances=1` (~\$5–10/month) if you want instant response at all times.
+- `--min-instances=0` means the service scales to zero when idle and you pay nothing; cold-start adds ~1–2s on the first request. Set `--min-instances=1` (~\$5–10/month) if you want instant response at all times. If you've populated `KB_EXEMPLAR_FOLDER_IDS`, `min-instances=1` also means the exemplar warm-up runs once at deploy time and every subsequent request reuses the cached pool (see [Exemplars](#exemplars-optional)).
 - Cloud Run mounts each file secret as read-only at the given path, so the Gmail token refresher cannot write back. To rotate `token.json`, re-run `cli auth` locally and add a new version: `gcloud secrets versions add gmail-token --data-file=token.json`.
 
 After deploy, copy the HTTPS URL Cloud Run prints (e.g. `https://wayonagio-email-agent-xxxxx-uc.a.run.app`) into the Apps Script `BACKEND_URL` Script Property, and set `BEARER_TOKEN` to the same value you stored in `auth-bearer-token`.
 
-### 5. Update / rotate
+### 5. Populate the knowledge base
+
+The service is deployed but will 503 on every draft until the KB index exists. Deploy the ingest Job, run it once manually, then let Cloud Scheduler own the yearly cadence.
+
+```bash
+# Create the Job (reuses the same image as the API).
+gcloud run jobs create wayonagio-kb-ingest \
+  --image="$IMG" \
+  --region=us-central1 \
+  --service-account="$SA" \
+  --command="python" \
+  --args="-m,wayonagio_email_agent.cli,kb-ingest" \
+  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids>,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json \
+  --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest,GEMINI_API_KEY=gemini-api-key:latest \
+  --set-secrets=/secrets/credentials.json=gmail-credentials:latest,/secrets/token.json=gmail-token:latest
+
+# Run it once NOW, synchronously, so the next draft request has a KB to ground in.
+gcloud run jobs execute wayonagio-kb-ingest --region=us-central1 --wait
+```
+
+Schedule future ingest runs. The agency refreshes its tour content roughly once a year, so a yearly cron is correct; run the Job manually via `gcloud run jobs execute` for any out-of-cycle edits.
+
+```bash
+gcloud scheduler jobs create http wayonagio-kb-ingest-yearly \
+  --location=us-central1 \
+  --schedule="15 4 15 1 *" \
+  --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$(gcloud config get-value project)/jobs/wayonagio-kb-ingest:run" \
+  --http-method=POST \
+  --oauth-service-account-email="$SA"
+```
+
+Verify the KB the service will see on its next cold start:
+
+```bash
+# Locally, pointing at the same GCS bucket the service reads:
+KB_GCS_URI=gs://wayonagio-kb \
+KB_RAG_FOLDER_IDS=<rag-folder-ids> \
+  uv run python -m wayonagio_email_agent.cli kb-doctor
+```
+
+`kb-doctor` exits non-zero on any hard failure (missing artifact, empty index, embedding-model mismatch), so this is also a good command to run as a deploy smoke-test step. Expect output like:
+
+```
+KB status: HEALTHY
+
+Config:
+  RAG folders configured:  1
+  Embedding model:         gemini/text-embedding-004
+  Top-K:                   4
+  Artifact destination:    gs://wayonagio-kb/kb_index.sqlite
+
+Index:
+  Artifact available:      yes
+  Loaded:                  yes
+  Ingested at:             2026-04-18T10:30:21+00:00 (<1h ago)
+  Chunks:                  247
+  ...
+```
+
+If `kb-doctor` says `UNHEALTHY`, fix what it reports before wiring the Add-on to the service.
+
+### 6. Update / rotate
 
 - **New code**: re-run steps 3 and 4. Cloud Run does zero-downtime traffic swap.
 - **Rotate bearer token**: `printf '%s' "$(openssl rand -base64 32)" | gcloud secrets versions add auth-bearer-token --data-file=-`, then `gcloud run services update wayonagio-email-agent --region=us-central1 --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest`, then update the Apps Script `BEARER_TOKEN`.
 - **Rotate Gemini key**: `gcloud secrets versions add gemini-api-key --data-file=-`, then redeploy/update the service so it picks up the new version.
 - **Refresh Gmail token** (if the OAuth refresh token is ever revoked): `uv run python -m wayonagio_email_agent.cli auth` locally, then `gcloud secrets versions add gmail-token --data-file=token.json`, then update the service.
 
-### 6. Test the image locally (optional)
+### 7. Test the image locally (optional)
 
 Before pushing, you can sanity-check the container locally:
 
@@ -864,7 +921,7 @@ src/wayonagio_email_agent/
   llm/client.py       # LiteLLM-backed LLM: detect_language, generate_reply, is_travel_related
   agent.py            # Orchestration: manual flow + scanner loop
   api.py              # FastAPI: POST /draft-reply
-  cli.py              # CLI: auth, list, draft-reply, scan, scan-once, kb-ingest, kb-search
+  cli.py              # CLI: auth, list, draft-reply, scan, scan-once, kb-ingest, kb-search, kb-doctor, exemplar-list
   state.py            # SQLite dedup state for scanner
   kb/                 # Knowledge base (required, KB_RAG_FOLDER_IDS)
     config.py         # Env-driven KB config + Drive URL parsing
@@ -876,6 +933,7 @@ src/wayonagio_email_agent/
     artifact.py       # GCS + local artifact I/O
     retrieve.py       # Runtime: retrieve() for llm/client
     ingest.py         # End-to-end ingest pipeline (kb-ingest)
+    doctor.py         # Health report builder behind `cli kb-doctor`
   exemplars/          # Curator-led example replies (optional, KB_EXEMPLAR_FOLDER_IDS)
     config.py         # Env-driven exemplar config (parallel to kb.config)
     sanitize.py       # PII tripwire: BOOKING_URL/email/IBAN/Luhn-card/phone passes

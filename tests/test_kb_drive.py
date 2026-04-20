@@ -8,11 +8,24 @@ the tests hermetic — no real Drive credentials required.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
+from googleapiclient.errors import HttpError
 
 from wayonagio_email_agent.kb import drive
+
+
+def _http_error(status: int, reason: str) -> HttpError:
+    """Build a real :class:`HttpError` — the constructor wants a ``httplib2``-
+    shaped response and a bytes body, so we synthesize the minimum the
+    internal parsing needs (status code + a JSON-ish body)."""
+    resp = type("R", (), {"status": status, "reason": reason})()
+    body = (
+        f'{{"error": {{"code": {status}, "message": "{reason}"}}}}'
+    ).encode()
+    return HttpError(resp, body)
 
 
 class _Executable:
@@ -273,3 +286,154 @@ def test_read_file_dispatches_on_mime(monkeypatch):
     monkeypatch.setattr(drive, "MediaIoBaseDownload", _FakeDownloader)
     result = drive.read_file(pdf, service=svc)
     assert result == b"%PDF-..."
+
+
+# ---------------------------------------------------------------------------
+# HttpError-path tests
+#
+# The happy-path tests above cover ~80% of the module. These anchor the
+# failure paths: every Drive call is wrapped in a ``try/except HttpError``
+# that either re-raises (list / export / download) or degrades gracefully
+# (_get_folder_name falls back to the folder ID so ingest can still proceed).
+# Without these tests the pagination loop, the exports, the downloads, and
+# the folder-name lookup could all silently swallow errors without anyone
+# noticing during a review.
+# ---------------------------------------------------------------------------
+
+
+class _RaisingExecute:
+    """Stand-in for a Drive request whose ``.execute()`` raises HttpError.
+
+    We use this instead of `_Executable` to exercise the `except HttpError`
+    branches in the module under test. Real HttpErrors surface from
+    ``.execute()`` (the point where the HTTP round-trip actually happens),
+    so raising there matches production behavior.
+    """
+
+    def __init__(self, error: HttpError):
+        self._error = error
+
+    def execute(self):
+        raise self._error
+
+
+class _ErroringFiles:
+    """Fake ``files()`` whose specific methods raise HttpError on execute."""
+
+    def __init__(
+        self,
+        *,
+        list_error: HttpError | None = None,
+        get_error: HttpError | None = None,
+        export_error: HttpError | None = None,
+        get_media_error: HttpError | None = None,
+    ):
+        self._list_error = list_error
+        self._get_error = get_error
+        self._export_error = export_error
+        self._get_media_error = get_media_error
+
+    def list(self, **_kwargs):
+        if self._list_error is not None:
+            return _RaisingExecute(self._list_error)
+        return _Executable({"files": [], "nextPageToken": None})
+
+    def get(self, **_kwargs):
+        if self._get_error is not None:
+            return _RaisingExecute(self._get_error)
+        return _Executable({"name": "Anything"})
+
+    def export(self, **_kwargs):
+        if self._export_error is not None:
+            return _RaisingExecute(self._export_error)
+        return _Executable(b"text")
+
+    def get_media(self, **_kwargs):
+        if self._get_media_error is not None:
+            # get_media itself is what raises for 404s — the error can fire
+            # at request-build time (unusual but possible for strict client
+            # versions) or during the MediaIoBaseDownload chunk loop.
+            raise self._get_media_error
+        return MagicMock()
+
+
+class TestListFolderHttpError:
+    def test_list_folder_surfaces_http_error(self, caplog):
+        """A 403/404 during paging must not be swallowed — ingest failing
+        loud here is how the operator learns the service account is
+        missing ``drive.readonly`` on the folder."""
+        err = _http_error(403, "forbidden")
+        svc = _FakeService(
+            _ErroringFiles(list_error=err)
+        )
+
+        with caplog.at_level(logging.ERROR, logger="wayonagio_email_agent.kb.drive"):
+            with pytest.raises(HttpError):
+                drive.list_folder("root", recursive=False, service=svc)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "Drive API error listing folder" in m and "root" in m
+            for m in messages
+        ), "expected an ERROR log that names the folder ID"
+
+
+class TestGetFolderNameHttpError:
+    def test_missing_folder_falls_back_to_id_and_logs_warning(self, caplog):
+        """``_get_folder_name`` is best-effort: if it can't resolve the
+        folder's display name, the Drive-path prefix in retrieval
+        citations becomes the raw folder ID instead of a human name.
+        That's ugly but not fatal, so we degrade gracefully with a
+        WARNING rather than aborting the whole ingest."""
+        err = _http_error(404, "not found")
+        svc = _FakeService(_ErroringFiles(get_error=err))
+
+        with caplog.at_level(logging.WARNING, logger="wayonagio_email_agent.kb.drive"):
+            # Calling _get_folder_name directly keeps the assertion tight.
+            # It's a module-private helper, but we test it to pin the
+            # graceful-degradation contract — the fall-back is what keeps
+            # a partial Drive misconfig (valid ingest folder, missing .get
+            # permission) from taking down the whole ingest run.
+            name = drive._get_folder_name(svc, "fid-xyz")
+
+        assert name == "fid-xyz"
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "Could not fetch folder name" in m and "fid-xyz" in m
+            for m in messages
+        )
+
+
+class TestExportDocAsTextHttpError:
+    def test_export_surfaces_http_error(self, caplog):
+        err = _http_error(500, "backend error")
+        svc = _FakeService(_ErroringFiles(export_error=err))
+
+        with caplog.at_level(logging.ERROR, logger="wayonagio_email_agent.kb.drive"):
+            with pytest.raises(HttpError):
+                drive.export_doc_as_text("doc-broken", service=svc)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "Drive API error exporting Doc" in m and "doc-broken" in m
+            for m in messages
+        )
+
+
+class TestDownloadFileHttpError:
+    def test_download_surfaces_http_error(self, caplog):
+        """A 404 during ``get_media`` must propagate so ingest can report
+        which specific file is broken and skip it at the orchestrator
+        level instead of producing a truncated index."""
+        err = _http_error(404, "not found")
+        svc = _FakeService(_ErroringFiles(get_media_error=err))
+
+        with caplog.at_level(logging.ERROR, logger="wayonagio_email_agent.kb.drive"):
+            with pytest.raises(HttpError):
+                drive.download_file("pdf-broken", service=svc)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "Drive API error downloading" in m and "pdf-broken" in m
+            for m in messages
+        )

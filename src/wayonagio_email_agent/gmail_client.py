@@ -247,7 +247,15 @@ def draft_reply(
     """
     mime = MIMEText(body, "plain", "utf-8")
     mime["To"] = to
-    mime["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    # Normalize before the prefix check: incoming subjects occasionally carry
+    # leading whitespace from line-folded headers, which would make a naive
+    # ``startswith("re:")`` miss and produce ugly ``Re:  Re: ...`` subjects.
+    normalized_subject = subject.strip()
+    mime["Subject"] = (
+        normalized_subject
+        if normalized_subject.lower().startswith("re:")
+        else f"Re: {normalized_subject}"
+    )
     mime["In-Reply-To"] = in_reply_to
     mime["References"] = references
 

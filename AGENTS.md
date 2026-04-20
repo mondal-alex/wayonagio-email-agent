@@ -41,6 +41,11 @@ uv run python -m wayonagio_email_agent.cli scan-once
 uv run python -m wayonagio_email_agent.cli kb-ingest
 uv run python -m wayonagio_email_agent.cli kb-search "sample query"
 
+# One-shot KB health report: artifact present, ingest age, chunk count,
+# per-source breakdown, embedding-model match, exemplar pool size.
+# Exits non-zero on hard failures — safe to wire into deploy smoke tests.
+uv run python -m wayonagio_email_agent.cli kb-doctor
+
 # Inspect the curator-led exemplar pool (optional feature)
 uv run python -m wayonagio_email_agent.cli exemplar-list
 
@@ -57,7 +62,7 @@ src/wayonagio_email_agent/
   llm/client.py       # LiteLLM-backed LLM client (generate_reply, is_travel_related, detect_language)
   agent.py            # Orchestration: manual draft flow + automatic scan loop
   api.py              # FastAPI: POST /draft-reply (Bearer auth required)
-  cli.py              # Admin CLI: list, draft-reply, scan, scan-once, kb-ingest, kb-search, exemplar-list
+  cli.py              # Admin CLI: list, draft-reply, scan, scan-once, kb-ingest, kb-search, kb-doctor, exemplar-list
   kb/                 # Required knowledge base (Drive-backed RAG grounding)
     config.py         # Env-driven config + Drive URL/ID parsing
     drive.py          # Drive wrapper: list folders, export Docs, download files
@@ -68,6 +73,7 @@ src/wayonagio_email_agent/
     artifact.py       # GCS + local artifact I/O
     retrieve.py       # Runtime API consumed by llm/client
     ingest.py         # End-to-end ingest pipeline
+    doctor.py         # Health report builder behind `cli kb-doctor`
   exemplars/          # Optional curator-led example replies (raw injection, no RAG)
     config.py         # Env-driven exemplar config (parallel to kb.config)
     sanitize.py       # PII tripwire: BOOKING_URL/email/IBAN/Luhn-card/phone passes

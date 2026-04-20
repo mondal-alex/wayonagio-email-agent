@@ -107,15 +107,20 @@ def _load_state(config: config_module.KBConfig) -> _KBState:
     return _KBState(index=index, cache_dir=cache_dir)
 
 
-def _ensure_loaded() -> _KBState:
+def _ensure_loaded(cfg: config_module.KBConfig) -> _KBState:
     """Return the process-wide KB state, loading it on first use.
 
     A failed load is **not** cached — transient outages (GCS hiccup, race with
     an in-progress ingest) self-heal on the next request rather than wedging
     the process until restart.
+
+    The caller passes in ``cfg`` so ``retrieve`` can reuse the same config
+    snapshot for both the cache-miss load and the downstream query (top_k,
+    embedding model). Loading the config twice per request was harmless but
+    created a narrow window where concurrent env-var changes could produce
+    an inconsistent picture.
     """
     global _state
-    cfg = config_module.load()
 
     if _state is None:
         with _lock:
@@ -145,9 +150,9 @@ def retrieve(query: str, *, top_k: int | None = None) -> list[ScoredChunk]:
     propagates the underlying provider exception if query embedding fails.
     The caller (``llm/client.generate_reply``) refuses to draft on either.
     """
-    state = _ensure_loaded()
-
     cfg = config_module.load()
+    state = _ensure_loaded(cfg)
+
     effective_k = top_k if top_k is not None else cfg.top_k
     if effective_k <= 0:
         return []

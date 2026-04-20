@@ -66,6 +66,29 @@ class TestDraftReply:
         mime = message_from_bytes(base64.urlsafe_b64decode(raw))
         assert mime["Subject"] == "Re: Existing thread"
 
+    def test_does_not_double_prefix_when_subject_has_leading_whitespace(self):
+        """Line-folded Subject headers occasionally reach us with leading
+        whitespace. Without the strip/normalize step, ``startswith("re:")``
+        misses and we'd emit an ugly ``Re:  Re: Existing`` subject.
+        """
+        service = Mock()
+        drafts_resource = service.users.return_value.drafts.return_value
+        drafts_resource.create.return_value.execute.return_value = {"id": "draft-ws"}
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            gmail_client.draft_reply(
+                thread_id="thread-ws",
+                to="guest@example.com",
+                subject="  Re: Existing thread",
+                body="Reply body",
+                in_reply_to="<msg@example.com>",
+                references="<msg@example.com>",
+            )
+
+        raw = drafts_resource.create.call_args.kwargs["body"]["message"]["raw"]
+        mime = message_from_bytes(base64.urlsafe_b64decode(raw))
+        assert mime["Subject"] == "Re: Existing thread"
+
     def test_non_ascii_subject_and_body_round_trip_utf8(self):
         """Italian / Spanish / emoji content must survive the MIME round-trip.
 

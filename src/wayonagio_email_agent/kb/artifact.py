@@ -84,8 +84,13 @@ def upload_artifact(config: KBConfig, local_path: Path, filename: str) -> str:
 def download_artifact(config: KBConfig, filename: str, dest_dir: Path) -> Path | None:
     """Fetch *filename* into *dest_dir* and return the local path.
 
-    Returns ``None`` when the artifact is not available — callers treat this
-    as "KB disabled / not ingested yet" and fall back silently.
+    Returns ``None`` when the artifact is not available (no object in GCS,
+    or no file in the local artifact dir). The KB is a hard dependency of
+    every draft, so callers (``kb.retrieve._load_state``, ``kb.doctor``)
+    treat ``None`` as a failure and raise ``KBUnavailableError`` / surface
+    an issue in the health report. We still return ``None`` rather than
+    raising so the caller controls the error message (it has more context
+    about whether retry, reingest, or configuration is the remedy).
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     local_target = dest_dir / filename

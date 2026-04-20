@@ -45,7 +45,7 @@ of these three boundaries:
 Three entry points sit on top:
 
 - **`api.py`** — `POST /draft-reply` for the Gmail Add-on (synchronous, low-volume).
-- **`cli.py`** — admin commands (`auth`, `list`, `draft-reply`, `scan`, `scan-once`, `kb-ingest`, `kb-search`).
+- **`cli.py`** — admin commands (`auth`, `list`, `draft-reply`, `scan`, `scan-once`, `kb-ingest`, `kb-search`, `kb-doctor`, `exemplar-list`).
 - **`agent.py`** — orchestration shared by both: `manual_draft_flow`, `scan_once`, `scan_loop`.
 
 There is no web UI, no database server (just a file), and no message queue.
@@ -349,6 +349,7 @@ modules and how they wire to the rest of the system:
 | `artifact.py` | both | Same — write side uploads, read side downloads. |
 | `ingest.py` | ingest only | `cli kb-ingest` only. |
 | `retrieve.py` | runtime only | `llm.client.generate_reply` and `cli kb-search`. |
+| `doctor.py` | runtime only | `cli kb-doctor`. Builds a health report (artifact presence, meta, per-source chunk breakdown, embedding-model match, exemplar count) using the same `artifact`/`store` read paths as `retrieve`. |
 
 The KB has its own contract with the rest of the agent:
 
@@ -599,7 +600,7 @@ lives in Gmail (Google).
 | Symptom | First file to check | Why |
 |---|---|---|
 | API returns 401 to the Add-on | `api._verify_token`, `AUTH_BEARER_TOKEN` env | Constant-time bearer compare. |
-| API returns 503 with "Knowledge base unavailable" | `kb/retrieve.py`, then `kb/artifact.py` | Index missing in GCS or `KB_LOCAL_DIR`. |
+| API returns 503 with "Knowledge base unavailable" | `cli kb-doctor` (diagnoses in one shot), then `kb/retrieve.py`, then `kb/artifact.py` | Index missing in GCS or `KB_LOCAL_DIR`, embedding-model mismatch, or corrupt index. |
 | API returns 502 with "LLM returned an empty reply" | `llm/client._chat`, then provider creds | Often Gemini quota or Ollama not running. |
 | API returns 503 with "Gmail authentication failed" | `gmail_client.load_credentials`, `token.json` | Refresh token revoked; re-run `cli auth`. |
 | Scanner re-drafts the same thread | `state.py`, `gmail_client.thread_has_draft` | Both dedup layers should have caught it. |

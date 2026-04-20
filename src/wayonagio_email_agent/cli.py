@@ -8,6 +8,7 @@ Usage:
   uv run python -m wayonagio_email_agent.cli scan-once [--dry-run]
   uv run python -m wayonagio_email_agent.cli kb-ingest
   uv run python -m wayonagio_email_agent.cli kb-search <query> [--top-k N]
+  uv run python -m wayonagio_email_agent.cli kb-doctor
   uv run python -m wayonagio_email_agent.cli exemplar-list
 """
 
@@ -86,16 +87,16 @@ def draft_reply(message_id: str) -> None:
     # 503/502 into clean ClickExceptions. Without this, operators running
     # the CLI to debug a Gmail thread see a Python traceback instead of an
     # actionable one-line error pointing at kb-ingest / the LLM provider.
+    #
+    # The exception messages already contain a remediation hint (e.g. "Run
+    # `kb-ingest` to publish kb_index.sqlite ..."), so we pass them through
+    # verbatim rather than appending a second, redundant hint.
     try:
         draft = agent.manual_draft_flow(message_id)
     except (KBUnavailableError, KBConfigError) as exc:
-        raise click.ClickException(
-            f"Knowledge base unavailable: {exc} Run `kb-ingest` and try again."
-        )
+        raise click.ClickException(f"Knowledge base unavailable: {exc}")
     except EmptyReplyError as exc:
-        raise click.ClickException(
-            f"LLM returned an empty reply: {exc} Check the LLM provider config and retry."
-        )
+        raise click.ClickException(f"LLM returned an empty reply: {exc}")
     click.echo(f"Draft created: {draft.get('id')}")
 
 
@@ -203,6 +204,50 @@ def kb_search(query: str, top_k: int) -> None:
         if len(preview) > 240:
             preview = preview[:237] + "..."
         click.echo(f"    {preview}")
+
+
+@cli.command(name="kb-doctor")
+@click.option(
+    "--max-sources",
+    default=20,
+    show_default=True,
+    help="How many of the most-chunked sources to list.",
+)
+def kb_doctor(max_sources: int) -> None:
+    """Print a one-shot health report for the knowledge base.
+
+    Answers the question every on-call operator asks first when drafts
+    start 503-ing: "what does the agent actually think is in the KB, and
+    when was it last ingested?" Surfaces, in one command:
+
+    * config snapshot (RAG folder count, embedding model, top-K, artifact
+      destination),
+    * whether the index artifact is present and loadable,
+    * ingest timestamp + age, chunk count, per-source chunk breakdown,
+    * whether the index's embedding model matches the runtime config,
+    * the exemplar pool's size + titles.
+
+    Exits non-zero when the KB is unhealthy (artifact missing, index
+    empty, embedding-model mismatch) so this command is safe to wire
+    into a readiness probe or a smoke-test step after ``kb-ingest``.
+    """
+    from wayonagio_email_agent.kb import doctor
+    from wayonagio_email_agent.kb.config import KBConfigError
+
+    try:
+        report = doctor.build_report()
+    except KBConfigError as exc:
+        raise click.ClickException(str(exc))
+    except Exception as exc:  # noqa: BLE001 — defensive: unknown subsystem failures
+        raise click.ClickException(f"kb-doctor failed: {exc}")
+
+    click.echo(doctor.format_report(report, max_sources=max_sources), nl=False)
+
+    if not report.healthy:
+        # A failing kb-doctor should break CI / deployment smoke tests,
+        # not just print and exit 0. ClickException owns the non-zero
+        # exit code and keeps the output we've already printed.
+        raise click.ClickException("KB is unhealthy — see report above.")
 
 
 @cli.command(name="exemplar-list")
