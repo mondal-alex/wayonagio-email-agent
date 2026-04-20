@@ -90,7 +90,7 @@ def test_format_reference_block_includes_source_paths(monkeypatch, tmp_path):
 def test_missing_artifacts_raise_loudly(monkeypatch, tmp_path):
     """No artifact published yet → fail the draft, do not silently ungroound."""
     _enable_kb(monkeypatch, tmp_path)
-    monkeypatch.setenv("KB_EMBEDDING_MODEL", "gemini/text-embedding-004")
+    monkeypatch.setenv("KB_EMBEDDING_MODEL", "gemini/gemini-embedding-001")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     kb_retrieve.reset_cache()
 

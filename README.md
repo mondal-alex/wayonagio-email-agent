@@ -18,7 +18,7 @@ LLM calls go through [LiteLLM](https://docs.litellm.ai/), which lets you swap pr
   - A [Google AI Studio API key](https://aistudio.google.com/app/apikey) for Gemini, **or**
   - [Ollama](https://ollama.com) running locally or on the server (`ollama serve`)
 
-> Even when you use Ollama as the LLM, the knowledge base defaults to Gemini embeddings (`gemini/text-embedding-004`), so an AI Studio key is typically still needed. See [`docs/LOCAL_TESTING.md` → Configure the knowledge base](docs/LOCAL_TESTING.md#configure-the-knowledge-base) for the fully-offline alternative.
+> Even when you use Ollama as the LLM, the knowledge base defaults to Gemini embeddings (`gemini/gemini-embedding-001`), so an AI Studio key is typically still needed. See [`docs/LOCAL_TESTING.md` → Configure the knowledge base](docs/LOCAL_TESTING.md#configure-the-knowledge-base) for the fully-offline alternative.
 
 ## Google Cloud / Gmail setup
 
@@ -272,7 +272,7 @@ The knowledge base is a **required** RAG component that reads content from Googl
 
 The ingest pipeline walks every configured folder (recursively, by default), extracts text from Google Docs, PDFs, plain text, and Markdown, chunks and embeds it, and publishes a single artifact:
 
-- `kb_index.sqlite` — vector index with embeddings (default model: `gemini/text-embedding-004`, dimension 768).
+- `kb_index.sqlite` — vector index with embeddings (default model: `gemini/gemini-embedding-001`, dimension 3072).
 
 Artifacts land in `KB_GCS_URI` (Cloud Run) or `KB_LOCAL_DIR` (dev / single-host). The API and scanner load the index at cold start. KB failures (no artifact published yet, GCS unreachable, embedding API down, embedding-model mismatch) raise `KBUnavailableError` and the draft request fails with a clear error rather than degrading silently.
 
@@ -282,7 +282,7 @@ Environment variables (see [.env.example](.env.example) for the full list):
 |---|---|
 | `KB_RAG_FOLDER_IDS` | **Required.** Comma-separated Drive folder IDs or share URLs. Drafting fails without it. |
 | `KB_RAG_RECURSIVE` | Walk subfolders (default `true`). |
-| `KB_EMBEDDING_MODEL` | LiteLLM model string for embeddings (default `gemini/text-embedding-004`). |
+| `KB_EMBEDDING_MODEL` | LiteLLM model string for embeddings (default `gemini/gemini-embedding-001`). |
 | `KB_GCS_URI` | Production: `gs://bucket[/prefix]`. The index lives here. |
 | `KB_LOCAL_DIR` | Dev fallback when `KB_GCS_URI` is unset (default `./kb_artifacts`). |
 | `KB_TOP_K` | Chunks to retrieve per email (default `4`). |
@@ -472,7 +472,7 @@ gcloud run deploy wayonagio-email-agent \
   --min-instances=0 \
   --max-instances=2 \
   --cpu=1 --memory=512Mi \
-  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json,SCANNER_ENABLED=false,LOG_LEVEL=INFO,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids> \
+  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json,SCANNER_ENABLED=false,LOG_LEVEL=INFO,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/gemini-embedding-001,KB_RAG_FOLDER_IDS=<rag-folder-ids> \
   --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest,GEMINI_API_KEY=gemini-api-key:latest \
   --set-secrets=/secrets/credentials.json=gmail-credentials:latest,/secrets/token.json=gmail-token:latest
 ```
@@ -496,7 +496,7 @@ gcloud run jobs create wayonagio-kb-ingest \
   --service-account="$SA" \
   --command="python" \
   --args="-m,wayonagio_email_agent.cli,kb-ingest" \
-  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/text-embedding-004,KB_RAG_FOLDER_IDS=<rag-folder-ids>,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json \
+  --set-env-vars=LLM_MODEL=gemini/gemini-2.5-flash,KB_GCS_URI=gs://wayonagio-kb,KB_EMBEDDING_MODEL=gemini/gemini-embedding-001,KB_RAG_FOLDER_IDS=<rag-folder-ids>,GMAIL_CREDENTIALS_PATH=/secrets/credentials.json,GMAIL_TOKEN_PATH=/secrets/token.json \
   --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest,GEMINI_API_KEY=gemini-api-key:latest \
   --set-secrets=/secrets/credentials.json=gmail-credentials:latest,/secrets/token.json=gmail-token:latest
 
@@ -531,7 +531,7 @@ KB status: HEALTHY
 
 Config:
   RAG folders configured:  1
-  Embedding model:         gemini/text-embedding-004
+  Embedding model:         gemini/gemini-embedding-001
   Top-K:                   4
   Artifact destination:    gs://wayonagio-kb/kb_index.sqlite
 

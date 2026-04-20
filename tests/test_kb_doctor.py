@@ -79,7 +79,7 @@ def kb_env(monkeypatch, tmp_path):
     monkeypatch.setenv("KB_RAG_FOLDER_IDS", "drive-folder-id")
     monkeypatch.setenv("KB_LOCAL_DIR", str(local_dir))
     monkeypatch.delenv("KB_GCS_URI", raising=False)
-    monkeypatch.setenv("KB_EMBEDDING_MODEL", "gemini/text-embedding-004")
+    monkeypatch.setenv("KB_EMBEDDING_MODEL", "gemini/gemini-embedding-001")
     # Exemplars deliberately disabled by default so doctor tests focus on
     # the KB path; dedicated tests below re-enable them.
     monkeypatch.delenv("KB_EXEMPLAR_FOLDER_IDS", raising=False)
@@ -104,7 +104,7 @@ class TestBuildReport:
                 ("Root / Tours 2026 / Sacred Valley.pdf", 6),
                 ("Root / FAQs.md", 3),
             ],
-            embedding_model="gemini/text-embedding-004",
+            embedding_model="gemini/gemini-embedding-001",
         )
 
         report = doctor.build_report()
@@ -115,7 +115,7 @@ class TestBuildReport:
         assert report.chunk_count == 27
         assert report.embedding_model_matches is True
         assert report.index_meta is not None
-        assert report.index_meta.embedding_model == "gemini/text-embedding-004"
+        assert report.index_meta.embedding_model == "gemini/gemini-embedding-001"
         assert report.issues == []
 
         # Per-source breakdown is sorted desc by chunk count — operators
@@ -152,20 +152,21 @@ class TestBuildReport:
         _write_fake_index(
             kb_env / "kb_index.sqlite",
             sources=[("Root / FAQs.md", 3)],
-            embedding_model="gemini/text-embedding-003",  # stale
+            embedding_model="gemini/text-embedding-004",  # retired, stale
         )
-        monkeypatch.setenv("KB_EMBEDDING_MODEL", "gemini/text-embedding-004")
+        monkeypatch.setenv("KB_EMBEDDING_MODEL", "gemini/gemini-embedding-001")
 
         report = doctor.build_report()
 
         assert report.healthy is False, (
             "an index built with a stale embedding model must register "
-            "as unhealthy — retrieval would otherwise silently mix 003 "
-            "vectors into a 004 query space."
+            "as unhealthy — retrieval would otherwise silently mix old "
+            "vectors into a new query space (e.g. 768-dim text-embedding-004 "
+            "chunks ranked against 3072-dim gemini-embedding-001 queries)."
         )
         assert report.embedding_model_matches is False
         assert any(
-            "text-embedding-003" in issue and "text-embedding-004" in issue
+            "text-embedding-004" in issue and "gemini-embedding-001" in issue
             for issue in report.issues
         )
 
@@ -228,7 +229,7 @@ class TestBuildReport:
         _write_fake_index(
             kb_env / "kb_index.sqlite",
             sources=[("Root / FAQs.md", 2)],
-            embedding_model="gemini/text-embedding-004",
+            embedding_model="gemini/gemini-embedding-001",
         )
         # Populate the exemplar cache directly — we're testing that
         # doctor reads it, not that the loader works.
@@ -249,7 +250,7 @@ class TestFormatReport:
         _write_fake_index(
             kb_env / "kb_index.sqlite",
             sources=[("Root / FAQs.md", 2)],
-            embedding_model="gemini/text-embedding-004",
+            embedding_model="gemini/gemini-embedding-001",
         )
         report = doctor.build_report()
         text = doctor.format_report(report)
@@ -279,7 +280,7 @@ class TestFormatReport:
         _write_fake_index(
             kb_env / "kb_index.sqlite",
             sources=sources,
-            embedding_model="gemini/text-embedding-004",
+            embedding_model="gemini/gemini-embedding-001",
         )
         report = doctor.build_report()
         text = doctor.format_report(report, max_sources=5)

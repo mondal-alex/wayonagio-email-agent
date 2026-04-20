@@ -20,7 +20,7 @@ DEFAULT_INCLUDE_MIME_TYPES = (
     "text/markdown",
 )
 
-_DEFAULT_EMBEDDING_MODEL = "gemini/text-embedding-004"
+_DEFAULT_EMBEDDING_MODEL = "gemini/gemini-embedding-001"
 _DEFAULT_ARTIFACT_DIR = "./kb_artifacts"
 _INDEX_FILENAME = "kb_index.sqlite"
 

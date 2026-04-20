@@ -57,7 +57,7 @@ class TestLoad:
         assert cfg.rag_folder_ids == ("1abc",)
         assert cfg.rag_recursive is True
         assert cfg.include_mime_types == config.DEFAULT_INCLUDE_MIME_TYPES
-        assert cfg.embedding_model == "gemini/text-embedding-004"
+        assert cfg.embedding_model == "gemini/gemini-embedding-001"
         assert cfg.gcs_uri == ""
         assert cfg.local_dir == "./kb_artifacts"
         assert cfg.top_k == 4

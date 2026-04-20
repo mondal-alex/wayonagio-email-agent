@@ -30,7 +30,7 @@ def test_write_and_load_round_trip(tmp_path):
         index_path,
         chunks,
         embeddings,
-        embedding_model="gemini/text-embedding-004",
+        embedding_model="gemini/gemini-embedding-001",
         source_file_count=2,
     )
 
@@ -38,7 +38,7 @@ def test_write_and_load_round_trip(tmp_path):
 
     loaded = load_index(index_path)
     assert bool(loaded) is True
-    assert loaded.meta.embedding_model == "gemini/text-embedding-004"
+    assert loaded.meta.embedding_model == "gemini/gemini-embedding-001"
     assert loaded.meta.dimension == 3
     assert loaded.meta.source_file_count == 2
     assert loaded.texts == ["hello", "world"]

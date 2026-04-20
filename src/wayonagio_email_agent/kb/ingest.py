@@ -120,27 +120,40 @@ def _ingest_rag(config: KBConfig, *, service: Any | None):
             include_mime_types=config.include_mime_types,
             service=service,
         )
+        logger.info(
+            "Folder %s: found %d file(s) to ingest.", folder_id, len(files)
+        )
 
-        for drive_file in files:
+        for index, drive_file in enumerate(files, start=1):
+            # "[3/42]" prefix turns the log stream into a visible progress
+            # bar for yearly ingest runs that otherwise take minutes and
+            # look frozen. Cheap to produce, highly operator-friendly.
+            prefix = f"[{index}/{len(files)}]"
+            logger.info(
+                "%s Ingesting %s (%s)...",
+                prefix, drive_file.path, drive_file.mime_type,
+            )
             try:
                 payload = drive.read_file(drive_file, service=service)
                 text = extract.extract_text(drive_file, payload)
             except extract.ExtractionError as exc:
-                logger.warning("Skipping %s: %s", drive_file.path, exc)
+                logger.warning("%s Skipping %s: %s", prefix, drive_file.path, exc)
                 continue
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "RAG source %s failed to read (%s); skipping.",
-                    drive_file.path,
-                    exc,
+                    "%s RAG source %s failed to read (%s); skipping.",
+                    prefix, drive_file.path, exc,
                 )
                 continue
 
             if not text.strip():
+                logger.info(
+                    "%s Skipping %s: extracted text was empty.",
+                    prefix, drive_file.path,
+                )
                 continue
 
-            sources_touched += 1
-            all_chunks.extend(
+            chunks_for_file = list(
                 chunk_text(
                     text,
                     source_id=drive_file.id,
@@ -148,10 +161,20 @@ def _ingest_rag(config: KBConfig, *, service: Any | None):
                     source_path=drive_file.path,
                 )
             )
+            sources_touched += 1
+            all_chunks.extend(chunks_for_file)
+            logger.info(
+                "%s Ingested %s: %d chunk(s) from %d char(s).",
+                prefix, drive_file.path, len(chunks_for_file), len(text),
+            )
 
     if not all_chunks:
         return sources_touched, [], np.zeros((0, 0), dtype=np.float32)
 
     texts = [chunk.text for chunk in all_chunks]
+    logger.info(
+        "Embedding %d chunk(s) from %d source(s)...",
+        len(texts), sources_touched,
+    )
     embeddings = embed.embed_texts(texts, model=config.embedding_model)
     return sources_touched, all_chunks, embeddings

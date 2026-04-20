@@ -102,12 +102,12 @@ The KB is a **hard dependency** — every draft must be grounded in agency conte
 
 1. **Pick a Drive folder** that contains real agency material (tour descriptions, FAQs, templates). One or two Google Docs or PDFs is enough for local testing. Copy the folder ID from the URL (`https://drive.google.com/drive/folders/<id>`) or the full share URL — the app accepts either.
 
-2. **Get a Gemini API key for embeddings.** Embeddings default to `gemini/text-embedding-004` because Google AI Studio hands out free-tier keys and the dimensionality matches what production uses. If you're already on Option A, reuse the same `GEMINI_API_KEY`. If you're on Option B and want to stay fully offline, set `KB_EMBEDDING_MODEL` to an Ollama embedding model such as `ollama/nomic-embed-text` (you'll also need to `ollama pull` it).
+2. **Get a Gemini API key for embeddings.** Embeddings default to `gemini/gemini-embedding-001` because Google AI Studio hands out free-tier keys and the dimensionality matches what production uses. If you're already on Option A, reuse the same `GEMINI_API_KEY`. If you're on Option B and want to stay fully offline, set `KB_EMBEDDING_MODEL` to an Ollama embedding model such as `ollama/nomic-embed-text` (you'll also need to `ollama pull` it).
 
 3. **Add these to `.env`:**
     - `KB_RAG_FOLDER_IDS=<folder-id-or-share-url>`
     - `KB_LOCAL_DIR=./kb_artifacts` (dev fallback; production uses `KB_GCS_URI`)
-    - `KB_EMBEDDING_MODEL=gemini/text-embedding-004`
+    - `KB_EMBEDDING_MODEL=gemini/gemini-embedding-001`
     - `GEMINI_API_KEY=<your-aistudio-key>` (same key you set for the LLM if you're on Option A)
 
 You'll actually populate the index in step 4 below, after `cli auth` has produced a `token.json` — the ingest pipeline reuses the same OAuth token to read Drive.

@@ -363,7 +363,7 @@ class TestKBDoctorCommand:
 
         defaults = dict(
             rag_folder_count=2,
-            embedding_model="gemini/text-embedding-004",
+            embedding_model="gemini/gemini-embedding-001",
             top_k=4,
             artifact_destination="gs://bucket/kb_index.sqlite",
             index_filename="kb_index.sqlite",

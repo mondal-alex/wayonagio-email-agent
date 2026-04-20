@@ -42,7 +42,7 @@ class TestEmbedTexts:
     def test_requires_gemini_api_key_for_gemini_models(self, monkeypatch):
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
-            embed.embed_texts(["x"], model="gemini/text-embedding-004")
+            embed.embed_texts(["x"], model="gemini/gemini-embedding-001")
 
     def test_passes_gemini_api_key(self, monkeypatch):
         monkeypatch.setenv("GEMINI_API_KEY", "sk-test")
@@ -54,7 +54,7 @@ class TestEmbedTexts:
 
         monkeypatch.setattr(embed.litellm, "embedding", fake_embedding)
 
-        embed.embed_texts(["x"], model="gemini/text-embedding-004")
+        embed.embed_texts(["x"], model="gemini/gemini-embedding-001")
         assert captured["api_key"] == "sk-test"
 
     def test_raises_when_provider_returns_fewer_vectors_than_inputs(self, monkeypatch):

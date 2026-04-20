@@ -5,4 +5,6 @@
 3. Need to implement some sort of observaibility platform.
 4. Is there a way to auto-deploy app script from Git?
 5. Should we handle Google Sheets?
+6. Better sdout for kb-ingest. Log when a new file is ingested. (DONE)
+7. Todo: How is duplicate knwoledge handeled in the KV (doc versus same PDF)
 

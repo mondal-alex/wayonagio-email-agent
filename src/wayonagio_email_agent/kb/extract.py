@@ -17,6 +17,14 @@ from wayonagio_email_agent.kb.drive import DriveFile
 
 logger = logging.getLogger(__name__)
 
+# Quiet pypdf's own structured warnings (e.g. "Ignoring wrong pointing object
+# N 0 (offset 0)") triggered by malformed xref tables in PDFs that pypdf
+# nonetheless recovers from. They're noisy and drown out our own per-file
+# ingest logs; we already surface real extraction failures via
+# ``ExtractionError``. Anything the user actually needs to see about a PDF
+# comes from our logger, not pypdf's.
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+
 _GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 _PDF_MIME = "application/pdf"
 _TEXT_MIMES = {"text/plain", "text/markdown"}

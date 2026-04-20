@@ -335,8 +335,8 @@ memory, after `load_index` has slurped the whole table.
 At the target scale:
 
 - Corpus: a few hundred to a few thousand chunks.
-- Embedding dim: 768 (Gemini `text-embedding-004`).
-- Memory: ~10 MB per 3,000 chunks.
+- Embedding dim: 3072 (Gemini `gemini-embedding-001`).
+- Memory: ~40 MB per 3,000 chunks (3072 float32 × 3 000 ≈ 36 MB, plus text).
 - Search: `(n, d) × (d,)` matmul + O(n) top-k. Sub-millisecond.
 
 Versus the alternatives:
@@ -365,7 +365,7 @@ loop at load. Not worth the complexity at our size.
 ### Why LiteLLM for embeddings too, not just chat?
 
 Same reason as `llm/client.py`: provider portability without code changes.
-`KB_EMBEDDING_MODEL=gemini/text-embedding-004` today, `ollama/nomic-embed-text`
+`KB_EMBEDDING_MODEL=gemini/gemini-embedding-001` today, `ollama/nomic-embed-text`
 in a disconnected-lab scenario, `openai/text-embedding-3-small` if we ever
 switch providers for unrelated reasons. The config swap is the deploy.
 

@@ -200,3 +200,42 @@ def test_ingest_skips_unextractable_files(monkeypatch, tmp_path, caplog):
 
     assert result.rag_source_count == 1
     assert any("broken.md" in rec.message for rec in caplog.records)
+
+
+def test_ingest_logs_progress_per_file(monkeypatch, tmp_path, caplog):
+    """Yearly ingest runs can take minutes; operators need a visible
+    progress trail rather than long silences. This pins the per-file
+    observability contract (start line + finish line + [i/N] prefix).
+    """
+    rag_files = [
+        drive_module.DriveFile(
+            id="f1",
+            name="A.md",
+            mime_type="text/markdown",
+            path="root / A.md",
+            modified_time="t",
+        ),
+        drive_module.DriveFile(
+            id="f2",
+            name="B.md",
+            mime_type="text/markdown",
+            path="root / B.md",
+            modified_time="t",
+        ),
+    ]
+    _patch_drive(
+        monkeypatch,
+        files_by_folder={"rag-root": rag_files},
+        payloads={"f1": b"alpha " * 20, "f2": b"beta " * 20},
+    )
+    _patch_embed(monkeypatch)
+
+    caplog.set_level("INFO", logger="wayonagio_email_agent.kb.ingest")
+    ingest.run(config=_cfg(tmp_path), service=object())
+
+    messages = [rec.message for rec in caplog.records]
+    assert any("[1/2]" in m and "Ingesting" in m and "A.md" in m for m in messages)
+    assert any("[1/2]" in m and "Ingested" in m and "chunk(s)" in m for m in messages)
+    assert any("[2/2]" in m and "Ingesting" in m and "B.md" in m for m in messages)
+    assert any("[2/2]" in m and "Ingested" in m and "chunk(s)" in m for m in messages)
+    assert any("found 2 file(s)" in m for m in messages)
