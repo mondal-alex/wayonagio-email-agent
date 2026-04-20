@@ -12,19 +12,21 @@ Use this flow to test Phase 1 locally with your own Gmail account. This keeps th
 4. Search for **Gmail API** and enable it.
 5. Still in the Library, search for **Google Drive API** and enable it. The agent reads agency content out of Drive to build the knowledge base.
 6. Open **APIs & Services → OAuth consent screen**.
-7. Configure the app as an **External** app if needed.
-8. Keep publishing status as **Testing** (do **not** publish for local testing).
-9. Add your own Gmail address as a **Test user** while the app is in testing mode.
-   - If your account is not listed as a test user, OAuth login will fail with `Error 403: access_denied`.
-10. Open **OAuth consent screen / Data access** and add exactly these scopes:
+7. Choose the **User type**. This decision matters — read before you click:
+    - **Internal** — pick this if your Google Cloud project is owned by a Google Workspace organization (e.g. `@wayonagio.com` managed via Workspace). Verify by opening **IAM & Admin → Settings**: if the **Organization** field shows a domain, the Internal radio button will be enabled. This is the right choice for a Workspace-hosted agency: anyone in the domain can authorize the app, nobody outside can, no test-user list is needed, no "unverified app" warning, and **refresh tokens don't expire** — the Cloud Run scanner can run unattended indefinitely.
+    - **External** — this is your only option if the project has no Workspace organization (a personal `@gmail.com` account, for example). While the app is in **Testing** status, External is capped at 100 test users and Google **rotates OAuth refresh tokens every 7 days**. That's fine for local dev, but for production you'll need to either (a) move the project into a Google Workspace tenant, or (b) publish the OAuth app (brand verification + homepage; not a full security audit for our scope list).
+8. **If you picked External:** keep publishing status as **Testing**, and add your own Gmail address as a **Test user**.
+    - If your account is not listed as a test user, OAuth login will fail with `Error 403: access_denied`.
+    - **If you picked Internal:** skip this step — there is no test-user list.
+9. Open **OAuth consent screen / Data access** and add exactly these scopes:
     - `https://www.googleapis.com/auth/gmail.readonly`
     - `https://www.googleapis.com/auth/gmail.compose`
     - `https://www.googleapis.com/auth/drive.readonly`
-11. Open **APIs & Services → Credentials**.
-12. Click **Create Credentials → OAuth client ID**.
-13. Choose **Desktop app**.
-14. Download the client credentials JSON file.
-15. Save it in this project, for example as `credentials.json`.
+10. Open **APIs & Services → Credentials**.
+11. Click **Create Credentials → OAuth client ID**.
+12. Choose **Desktop app**.
+13. Download the client credentials JSON file.
+14. Save it in this project, for example as `credentials.json`.
 
 ## 2. Choose and set up your LLM
 
@@ -109,6 +111,10 @@ The KB is a **hard dependency** — every draft must be grounded in agency conte
     - `GEMINI_API_KEY=<your-aistudio-key>` (same key you set for the LLM if you're on Option A)
 
 You'll actually populate the index in step 4 below, after `cli auth` has produced a `token.json` — the ingest pipeline reuses the same OAuth token to read Drive.
+
+### Exemplars (optional, skip for Phase 1)
+
+`.env.example` also exposes a `KB_EXEMPLAR_FOLDER_IDS` entry. Leave it commented out for Phase 1 — exemplars are an opt-in voice/style feature layered on top of the KB, and drafting works fine without them. When you're ready to enable curator-written example replies (typically after the first week of real usage, when the agency has opinions on what good drafts look like), follow [`src/wayonagio_email_agent/exemplars/README.md`](../src/wayonagio_email_agent/exemplars/README.md) — it covers the curator contract, Drive folder layout, PII handling, and the refresh story.
 
 ## 4. Install dependencies and authenticate with Gmail
 

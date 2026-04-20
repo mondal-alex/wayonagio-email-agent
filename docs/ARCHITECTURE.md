@@ -662,7 +662,111 @@ technology preference.
 
 ---
 
-## 8. Definition of done for a change
+## 8. Templates (plantillas): planned trajectory
+
+The agency maintains a handful of reply templates — the canonical example is
+the opener used to start a new client-inquiry thread. Templates are a
+different beast from the two content pools the codebase already has, and
+this section exists so the next person who picks up the work doesn't
+reinvent the analysis.
+
+### Why templates are not KB chunks and not exemplars
+
+| Pool | Content | Retrieval | Used as |
+|---|---|---|---|
+| KB | Facts (tours, prices, policies) | Similarity search (RAG) | Cited reference material |
+| Exemplars | Q&A that models the house voice | Whole pool, raw injection | "Here's how we write" |
+| **Templates** | **Approved reply scaffolds** | **Categorical match** | **Emitted nearly verbatim, minus placeholders** |
+
+A template isn't a *fact* to cite and it isn't a *style example* to imitate
+— it's the response itself, or most of it. Two consequences:
+
+- **Not the KB.** KB retrieval is by semantic similarity, which is the
+  wrong match function for "this is a first-contact inquiry, use the
+  first-contact opener." Chunking a template also destroys its structure,
+  which is the whole point of a template.
+- **Not the Gmail templates API.** Gmail's canned responses are reachable
+  via `users.drafts.list` (they're drafts with a special label), but
+  they're tied to one user's mailbox, carry no "when to use this"
+  metadata, and have no `insertTemplate` endpoint — the compose UI does
+  the insertion client-side. Drive is a better source of truth: central,
+  team-editable, versioned, already wired into `kb/drive.py`.
+
+### Recommended three-phase rollout
+
+The phases escalate in code cost. Do **not** skip ahead — each phase
+generates evidence that justifies (or refutes) the next.
+
+**Phase 1 — zero code, templates-as-exemplars.** Drop each template into
+the existing exemplar Drive folder. First paragraph of the Doc states the
+trigger situation (*"Use this template for first-contact inquiries about
+multi-day Sacred Valley tours"*); template body follows, with
+`<placeholders>` for personalization. The LLM already sees the full
+exemplar pool on every draft and will pattern-match the situation.
+
+- Ship cost: writing the Docs.
+- Success signal: drafts come out close to verbatim for matched situations.
+- Failure modes: LLM paraphrases the template, ignores the template, or
+  picks the wrong one. No observability — you can't tell from the output
+  whether a template "fired."
+
+**Phase 2 — dedicated `templates/` module.** Trigger only if Phase 1
+produces unacceptable paraphrasing. Mirrors `exemplars/` architecturally
+(Drive-folder source, raw injection, process-level cache, `lifespan`
+warm-up) but with stricter prompt framing slotted in between
+`REFERENCE MATERIAL` and `EXAMPLE RESPONSES`:
+
+> TEMPLATES — If the customer's message matches one of the trigger
+> situations below, emit the template body **verbatim**, substituting
+> only the `<placeholder>` fields. Do not paraphrase.
+
+Different Drive folder (`KB_TEMPLATE_FOLDER_IDS`), different prompt slot,
+same infrastructure. Roughly ~200 lines of new code plus tests. The
+coherence guard in `llm/client.generate_reply` (the one that ties
+exemplars to the presence of a reference block) gets a third branch.
+
+**Phase 3 — classifier + deterministic insertion.** Trigger only if
+Phase 2 still misfires. A small first-pass LLM call ("Is this an initial
+inquiry, a cancellation, a rebooking, or none?"), then the matched
+template is pasted in as a fixed scaffold and the main LLM call only
+fills `<placeholder>` fields and adds a personalized closing. Maximally
+reliable, maximally observable, also the most code and the most rigid —
+defer until a real failure mode justifies it.
+
+### Constraints that apply across all three phases
+
+- **Templates never bypass the draft-only invariant.** Even in Phase 3,
+  output goes through `gmail_client.draft_reply`, never `messages.send`.
+- **Templates never bypass the KB hard dependency.** A reply that's 95 %
+  boilerplate still has 5 % facts; the KB must be present for drafting
+  to proceed (see [§4 invariants](#4-the-non-negotiable-invariants)).
+- **Template failures degrade gracefully.** Like exemplars, a missing or
+  empty templates pool must not break drafting — fall through to the
+  base prompt.
+- **PII sanitization still applies.** Templates live in the same Drive
+  tenant as exemplars; run them through `exemplars.sanitize.sanitize`
+  (or a templates-scoped equivalent) on ingest. A template written by a
+  human may accidentally carry a previous guest's name or booking ID.
+
+### What to do right now
+
+1. Curator picks the 2–3 most common templates (first-contact opener is
+   a great start).
+2. Each gets a Google Doc in the exemplar folder, trigger in paragraph
+   one, body below, `<placeholders>` marked explicitly.
+3. Send a handful of test emails that should trigger each template.
+4. Read the drafts:
+   - Close to verbatim → Phase 1 is sufficient. Ship.
+   - Paraphrased but correct situation → Phase 2 (tighter prompt framing).
+   - Wrong situation picked → Phase 3 (deterministic classifier).
+
+This sequencing keeps the codebase shape honest: we add modules only
+when the LLM fails us, not in anticipation of a failure that may never
+come.
+
+---
+
+## 9. Definition of done for a change
 
 When adding or modifying code, a change is "done" when:
 

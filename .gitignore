@@ -12,9 +12,11 @@ wheels/
 # Environment variables
 .env
 .env.local
+.env.personal
 
 # Google OAuth credentials
 credentials.json
+credentials.json.personal
 token.json
 
 # Scanner state

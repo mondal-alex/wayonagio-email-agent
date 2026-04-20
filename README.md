@@ -32,7 +32,11 @@ LLM calls go through [LiteLLM](https://docs.litellm.ai/), which lets you swap pr
    - `https://www.googleapis.com/auth/gmail.readonly`
    - `https://www.googleapis.com/auth/gmail.compose`
    - `https://www.googleapis.com/auth/drive.readonly`
-7. Go to **OAuth consent screen / Audience** and add the Gmail account as a test user (while in testing mode).
+7. Pick the **User type** on the OAuth consent screen:
+   - **Internal** if the project is owned by a Google Workspace organization (e.g. `@wayonagio.com` via Workspace). Verify at **IAM & Admin → Settings → Organization**. No test-user list needed, refresh tokens don't expire.
+   - **External** otherwise. While in **Testing**, add the Gmail account as a test user, and note that refresh tokens rotate every 7 days — either move to a Workspace tenant or publish the OAuth app before running the scanner unattended in production.
+
+   See [`docs/LOCAL_TESTING.md` → step 7](docs/LOCAL_TESTING.md#1-create-gmail--drive-oauth-credentials) for the fuller rationale.
 
 ## Installation
 
