@@ -2,6 +2,14 @@
 
 A **draft-only** email response agent for a Cusco (Peru) travel agency. It connects to Gmail via the Gmail API and uses an LLM to generate multilingual draft replies (Italian, Spanish, English). Staff trigger drafts via a Gmail Add-on button; an automatic scanner creates drafts for new travel-related emails.
 
+It uses a **layered optimization stack** so drafts are grounded, on-brand, and resilient:
+
+- **Knowledge base RAG (required):** Google Drive content is chunked + embedded; replies are grounded with retrieved `REFERENCE MATERIAL`.
+- **Exemplars (optional):** curator-written sample replies shape tone/style via an `EXAMPLE RESPONSES` prompt block.
+- **Full thread context:** drafts use the complete thread (first contact through the selected message), not just one email.
+- **Latest-turn prioritization:** the model answers the most recent customer turn first and treats earlier turns as context only.
+- **Operational resilience:** retries/backoff for transient Gemini/Gmail failures, plus explicit logging for thread load/truncation.
+
 **The agent never sends email.** It only calls `drafts.create`. Sending is always done manually by staff in Gmail.
 
 LLM calls go through [LiteLLM](https://docs.litellm.ai/), which lets you swap providers without code changes. Two supported setups:
