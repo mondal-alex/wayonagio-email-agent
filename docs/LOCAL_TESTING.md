@@ -173,6 +173,7 @@ uv run python -m wayonagio_email_agent.cli draft-reply <message_id>
 Open Gmail and confirm:
 - a draft was created,
 - it appears in the correct thread,
+- the reply reflects the whole thread context (first contact through the target message), not just the latest line,
 - it was not sent automatically.
 
 ## 6. Test the local API directly

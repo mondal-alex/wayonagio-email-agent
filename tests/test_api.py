@@ -161,6 +161,11 @@ class TestDraftReplyEndpoint:
             patch.object(
                 gmail_client, "extract_message_parts", return_value=fake_parts
             ),
+            patch.object(
+                gmail_client,
+                "build_thread_transcript",
+                return_value=fake_parts["body"],
+            ),
             patch.object(llm_module, "detect_language", return_value="en"),
             # If 503 mapping is broken, generate_reply will be called and we'd
             # hit a real LLM; assert it's never reached.

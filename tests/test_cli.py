@@ -40,8 +40,18 @@ class TestListCommand:
         runner = CliRunner()
         messages = [{"id": "m1", "threadId": "t1"}, {"id": "m2", "threadId": "t2"}]
         metadata = [
-            {"id": "m1", "from_": "alice@example.com", "subject": "Tour inquiry"},
-            {"id": "m2", "from_": "bob@example.com", "subject": "Refund question"},
+            {
+                "id": "m1",
+                "from_": "alice@example.com",
+                "subject": "Tour inquiry",
+                "received_at": "2026-04-20 14:00 UTC",
+            },
+            {
+                "id": "m2",
+                "from_": "bob@example.com",
+                "subject": "Refund question",
+                "received_at": "2026-04-19 09:30 UTC",
+            },
         ]
         with (
             patch(
@@ -63,6 +73,8 @@ class TestListCommand:
         assert "bob@example.com" in result.output
         assert "Tour inquiry" in result.output
         assert "Refund question" in result.output
+        assert "2026-04-20 14:00 UTC" in result.output
+        assert "2026-04-19 09:30 UTC" in result.output
 
     def test_empty_result_prints_friendly_message(self):
         runner = CliRunner()

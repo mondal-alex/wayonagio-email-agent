@@ -76,9 +76,10 @@ agent.manual_draft_flow(message_id, forced_language)
     │
     ├──▶ gmail_client.get_message(message_id)        ── Gmail API
     ├──▶ gmail_client.extract_message_parts(...)     ── parse MIME tree
-    ├──▶ llm.detect_language(body)                   ── only if no forced_language
-    ├──▶ llm.generate_reply(original, language)
-    │       └──▶ kb.retrieve.retrieve(original)      ── REQUIRED, raises if KB down
+    ├──▶ gmail_client.build_thread_transcript(...)   ── full thread through anchor
+    ├──▶ llm.detect_language(thread_transcript)      ── only if no forced_language
+    ├──▶ llm.generate_reply(thread_transcript, subject, language)
+    │       └──▶ kb.retrieve.retrieve(kb_query)      ── REQUIRED, raises if KB down
     │       └──▶ kb.retrieve.format_reference_block  ── prepend to user prompt
     │       └──▶ exemplars.loader.get_all_exemplars  ── OPTIONAL, never raises (cached)
     │       └──▶ exemplars.prompt.format_exemplar_block  ── append AFTER reference block
@@ -132,13 +133,14 @@ Per-message logic in `agent._process_message`:
 1. state.is_processed(message_id)?              ── primary dedup, SQLite
    └─▶ skip
 2. gmail_client.get_message + extract_message_parts
-3. llm.is_travel_related(subject, body)         ── tiny yes/no + lang prompt
+3. gmail_client.build_thread_transcript(...)    ── full thread through anchor
+4. llm.is_travel_related(subject, thread)       ── tiny yes/no + lang prompt
    └─▶ if no: state.mark_processed(outcome="non_travel")
-4. gmail_client.thread_has_draft(thread_id)     ── secondary dedup, Gmail API
+5. gmail_client.thread_has_draft(thread_id)     ── secondary dedup, Gmail API
    └─▶ if yes: state.mark_processed(outcome="thread_has_draft")
-5. llm.generate_reply(...)                      ── same path as manual
-6. gmail_client.draft_reply(...)                ── drafts.create
-7. state.mark_processed(outcome="drafted")
+6. llm.generate_reply(...)                      ── same path as manual
+7. gmail_client.draft_reply(...)                ── drafts.create
+8. state.mark_processed(outcome="drafted")
 ```
 
 Two layers of dedup are deliberate: SQLite is fast and prevents repeated LLM
@@ -208,6 +210,8 @@ plain dicts; orchestration lives in `agent.py`.
 | `run_auth_flow()` | `Credentials` | Interactive — needs a browser. Used by `cli auth`. |
 | `list_messages(q, max_results)` | `list[dict]` | Each dict has just `id` and `threadId`. |
 | `get_message(message_id)` | `dict` | Full Gmail payload. |
+| `get_thread_full(thread_id)` | `dict` | Full thread payload (`threads.get(format=full)`). |
+| `build_thread_transcript(...)` | `str` | Chronological transcript from first contact through anchor message; drops oldest turns when over `LLM_THREAD_MAX_CHARS`. |
 | `get_messages_metadata(ids, headers)` | `list[dict]` | Single batched request — N+1 avoidance for `cli list`. |
 | `thread_has_draft(thread_id)` | `bool` | Secondary scanner dedup. |
 | `draft_reply(...)` | `dict` | **Only ever calls `drafts.create`.** Never `drafts.send` or `messages.send`. Asserted by `TestDraftOnlyInvariant`. |
@@ -231,8 +235,8 @@ any Gmail concept.
 | Function | Purpose | Failure mode |
 |---|---|---|
 | `detect_language(text)` | Returns `"it"` / `"es"` / `"en"`. | Defaults to `"en"` on unparseable response (logged). |
-| `generate_reply(original, language)` | Builds the grounded prompt, calls LiteLLM. | Raises `EmptyReplyError` on blank reply. Propagates `KBUnavailableError`. |
-| `is_travel_related(subject, body)` | Returns `(bool, lang)`. Used by scanner only. | Defaults to `(False, "en")` on garbage. |
+| `generate_reply(thread_transcript, subject, language)` | Builds a thread-aware grounded prompt, calls LiteLLM. | Raises `EmptyReplyError` on blank reply. Propagates `KBUnavailableError`. |
+| `is_travel_related(subject, body)` | Returns `(bool, lang)`. `body` is usually the full thread transcript in scanner flow. | Defaults to `(False, "en")` on garbage. |
 
 **Invariant:** `generate_reply` always retrieves from the KB and always
 threads the `REFERENCE MATERIAL` block into the user prompt before calling

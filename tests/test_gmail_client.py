@@ -201,6 +201,271 @@ class TestThreadHasDraft:
         service.users.return_value.drafts.return_value.list.assert_not_called()
 
 
+class TestThreadTranscript:
+    def _thread_message(
+        self,
+        *,
+        mid: str,
+        internal_date: str | None,
+        sender: str,
+        subject: str,
+        body: str,
+        label_ids: list[str] | None = None,
+    ) -> dict:
+        msg: dict = {
+            "id": mid,
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": sender},
+                    {"name": "Subject", "value": subject},
+                ],
+                "mimeType": "text/plain",
+                "body": {"data": _urlsafe_b64(body)},
+            },
+            "labelIds": label_ids or ["INBOX"],
+        }
+        if internal_date is not None:
+            msg["internalDate"] = internal_date
+        return msg
+
+    def test_includes_messages_up_to_anchor_excluding_drafts(self):
+        thread = {
+            "messages": [
+                # Out-of-order on purpose: should be sorted by internalDate.
+                self._thread_message(
+                    mid="m3",
+                    internal_date="3000",
+                    sender="guest@example.com",
+                    subject="Third",
+                    body="Third body",
+                ),
+                self._thread_message(
+                    mid="m1",
+                    internal_date="1000",
+                    sender="guest@example.com",
+                    subject="First",
+                    body="First body",
+                ),
+                # Draft must be excluded from transcript.
+                self._thread_message(
+                    mid="md",
+                    internal_date="1500",
+                    sender="staff@example.com",
+                    subject="Draft",
+                    body="Draft text",
+                    label_ids=["DRAFT"],
+                ),
+                self._thread_message(
+                    mid="m2",
+                    internal_date="2000",
+                    sender="staff@example.com",
+                    subject="Second",
+                    body="Second body",
+                ),
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            transcript = gmail_client.build_thread_transcript(
+                thread_id="t-1",
+                anchor_message_id="m2",
+                max_chars=10_000,
+            )
+
+        assert "First body" in transcript
+        assert "Second body" in transcript
+        assert "Third body" not in transcript, "messages after anchor must be excluded"
+        assert "Draft text" not in transcript, "DRAFT-labeled messages must be excluded"
+
+        first_idx = transcript.index("First body")
+        second_idx = transcript.index("Second body")
+        assert first_idx < second_idx
+
+    def test_truncates_oldest_messages_first_with_banner(self):
+        thread = {
+            "messages": [
+                self._thread_message(
+                    mid="m1",
+                    internal_date="1000",
+                    sender="a@example.com",
+                    subject="S1",
+                    body="A" * 300,
+                ),
+                self._thread_message(
+                    mid="m2",
+                    internal_date="2000",
+                    sender="b@example.com",
+                    subject="S2",
+                    body="B" * 300,
+                ),
+                self._thread_message(
+                    mid="m3",
+                    internal_date="3000",
+                    sender="c@example.com",
+                    subject="S3",
+                    body="C" * 300,
+                ),
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            transcript = gmail_client.build_thread_transcript(
+                thread_id="t-1",
+                anchor_message_id="m3",
+                max_chars=500,
+            )
+
+        assert transcript.startswith("[Earlier thread messages omitted")
+        assert "A" * 100 not in transcript
+        assert ("B" * 100 in transcript) or ("C" * 100 in transcript)
+
+    def test_logs_fetch_and_truncation_stats(self, caplog):
+        thread = {
+            "messages": [
+                self._thread_message(
+                    mid="m1",
+                    internal_date="1000",
+                    sender="a@example.com",
+                    subject="S1",
+                    body="A" * 300,
+                ),
+                self._thread_message(
+                    mid="m2",
+                    internal_date="2000",
+                    sender="b@example.com",
+                    subject="S2",
+                    body="B" * 300,
+                ),
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        caplog.set_level("INFO", logger="wayonagio_email_agent.gmail_client")
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            gmail_client.build_thread_transcript(
+                thread_id="t-logs",
+                anchor_message_id="m2",
+                max_chars=300,
+            )
+
+        messages = [rec.message for rec in caplog.records]
+        assert any("fetched 2 message(s)" in m and "non-draft message(s)" in m for m in messages)
+        assert any("transcript truncated" in m and "dropped" in m for m in messages)
+
+    def test_keeps_messages_with_invalid_internaldate_using_api_order_fallback(self):
+        thread = {
+            "messages": [
+                self._thread_message(
+                    mid="m1",
+                    internal_date=None,
+                    sender="a@example.com",
+                    subject="NoDate",
+                    body="NoDate body",
+                ),
+                self._thread_message(
+                    mid="m2",
+                    internal_date="2000",
+                    sender="b@example.com",
+                    subject="HasDate",
+                    body="HasDate body",
+                ),
+                self._thread_message(
+                    mid="m3",
+                    internal_date="not-a-number",
+                    sender="c@example.com",
+                    subject="BadDate",
+                    body="BadDate body",
+                ),
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            transcript = gmail_client.build_thread_transcript(
+                thread_id="t-1",
+                anchor_message_id="m3",
+                max_chars=10_000,
+            )
+
+        assert "NoDate body" in transcript
+        assert "HasDate body" in transcript
+        assert "BadDate body" in transcript
+        assert transcript.index("NoDate body") < transcript.index("HasDate body")
+        assert transcript.index("HasDate body") < transcript.index("BadDate body")
+
+    def test_omission_banner_survives_tight_budget(self):
+        thread = {
+            "messages": [
+                self._thread_message(
+                    mid="m1",
+                    internal_date="1000",
+                    sender="a@example.com",
+                    subject="S1",
+                    body="X" * 600,
+                ),
+                self._thread_message(
+                    mid="m2",
+                    internal_date="2000",
+                    sender="b@example.com",
+                    subject="S2",
+                    body="Y" * 600,
+                ),
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            transcript = gmail_client.build_thread_transcript(
+                thread_id="t-1",
+                anchor_message_id="m2",
+                max_chars=220,
+            )
+
+        assert transcript.startswith("[Earlier thread messages omitted")
+
+    def test_raises_when_anchor_missing_after_filtering(self):
+        thread = {
+            "messages": [
+                self._thread_message(
+                    mid="m1",
+                    internal_date="1000",
+                    sender="a@example.com",
+                    subject="First",
+                    body="First body",
+                )
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            with pytest.raises(ValueError, match="Anchor message not found"):
+                gmail_client.build_thread_transcript(
+                    thread_id="t-1",
+                    anchor_message_id="missing",
+                    max_chars=10_000,
+                )
+
+
 class TestGetMessagesMetadata:
     """Regression guards for the N+1 fix in ``cli list``.
 
@@ -310,6 +575,132 @@ class TestGetMessagesMetadata:
         assert "error" in by_id["id-1"]
         assert by_id["id-2"]["subject"] == "Two"
 
+    def test_chunks_large_batches_below_per_user_concurrency_cap(self, monkeypatch):
+        """Gmail caps concurrent requests per user around 10; bundling 50
+        messages.get calls into one batch reliably 429s the overflow with
+        "Too many concurrent requests for user." We must split the batch
+        into chunks of <= ``_BATCH_CHUNK_SIZE`` so each round-trip stays
+        inside the cap.
+        """
+        monkeypatch.setattr(gmail_client.time, "sleep", lambda s: None)
+
+        executed_chunk_sizes: list[int] = []
+
+        def make_batch():
+            batch = Mock()
+            chunk_added: list[str] = []
+
+            def fake_add(request, request_id):
+                chunk_added.append(request_id)
+
+            def fake_execute():
+                executed_chunk_sizes.append(len(chunk_added))
+                callback = service.new_batch_http_request.call_args.kwargs["callback"]
+                for rid in chunk_added:
+                    callback(
+                        rid,
+                        {
+                            "threadId": f"t-{rid}",
+                            "payload": {"headers": [{"name": "Subject", "value": rid}]},
+                        },
+                        None,
+                    )
+
+            batch.add.side_effect = fake_add
+            batch.execute.side_effect = fake_execute
+            return batch
+
+        service = Mock()
+        service.new_batch_http_request = Mock(side_effect=lambda callback: make_batch())
+
+        ids = [f"id-{i}" for i in range(25)]
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            rows = gmail_client.get_messages_metadata(ids)
+
+        # 25 ids / 10 per chunk = 3 chunks (10, 10, 5).
+        assert executed_chunk_sizes == [10, 10, 5]
+        assert all(size <= gmail_client._BATCH_CHUNK_SIZE for size in executed_chunk_sizes)
+        assert len(rows) == 25
+        assert {r["id"] for r in rows} == set(ids)
+
+    def test_retries_per_message_429s_with_backoff(self, monkeypatch):
+        """A 429 on a specific id inside the batch must be retried — that's
+        the recoverable case (transient concurrency spike). 404s and other
+        statuses must NOT be retried, since waiting won't help.
+        """
+        monkeypatch.setattr(gmail_client.time, "sleep", lambda s: None)
+
+        attempt_history: dict[str, int] = {}
+
+        def make_batch():
+            batch = Mock()
+            chunk_added: list[str] = []
+
+            def fake_add(request, request_id):
+                chunk_added.append(request_id)
+
+            def fake_execute():
+                callback = service.new_batch_http_request.call_args.kwargs["callback"]
+                for rid in chunk_added:
+                    attempts = attempt_history.get(rid, 0) + 1
+                    attempt_history[rid] = attempts
+                    if rid == "id-flaky" and attempts == 1:
+                        # Transient 429 on first attempt, succeeds on retry.
+                        callback(
+                            rid,
+                            None,
+                            HttpError(
+                                resp=Mock(
+                                    status=429,
+                                    reason="Too Many Requests",
+                                ),
+                                content=b"slow down",
+                            ),
+                        )
+                    elif rid == "id-gone":
+                        callback(
+                            rid,
+                            None,
+                            HttpError(
+                                resp=Mock(status=404, reason="Not Found"),
+                                content=b"gone",
+                            ),
+                        )
+                    else:
+                        callback(
+                            rid,
+                            {
+                                "threadId": f"t-{rid}",
+                                "payload": {
+                                    "headers": [{"name": "Subject", "value": rid}]
+                                },
+                            },
+                            None,
+                        )
+
+            batch.add.side_effect = fake_add
+            batch.execute.side_effect = fake_execute
+            return batch
+
+        service = Mock()
+        service.new_batch_http_request = Mock(side_effect=lambda callback: make_batch())
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            rows = gmail_client.get_messages_metadata(
+                ["id-1", "id-flaky", "id-gone"]
+            )
+
+        by_id = {r["id"]: r for r in rows}
+        # 429 was retried and recovered.
+        assert by_id["id-flaky"]["subject"] == "id-flaky"
+        assert attempt_history["id-flaky"] == 2
+        # 404 was NOT retried — that would just slow the failure down.
+        assert "error" in by_id["id-gone"]
+        assert attempt_history["id-gone"] == 1
+        # Healthy id was fetched once.
+        assert by_id["id-1"]["subject"] == "id-1"
+        assert attempt_history["id-1"] == 1
+
 
 class TestMessageParsing:
     def test_decode_body_handles_missing_base64_padding(self):
@@ -350,11 +741,14 @@ class TestMessageParsing:
             "thread_id": "thread-1",
             "message_id_header": "",
             "references": "",
+            "received_at": "",
         }
 
     def test_extract_message_parts_reads_headers_and_body(self):
         message = {
             "threadId": "thread-9",
+            # Epoch ms for 2021-01-01 00:00:00 UTC — disambiguates list rows.
+            "internalDate": "1609459200000",
             "payload": {
                 "headers": [
                     {"name": "Subject", "value": "Tour inquiry"},
@@ -377,6 +771,7 @@ class TestMessageParsing:
         assert parts["thread_id"] == "thread-9"
         assert parts["message_id_header"] == "<msg-9@example.com>"
         assert parts["references"] == "<old@example.com>"
+        assert parts["received_at"] == "2021-01-01 00:00 UTC"
 
 
 class TestLoadCredentials:
@@ -451,6 +846,20 @@ class TestLoadCredentials:
         ):
             with pytest.raises(SystemExit):
                 gmail_client.load_credentials()
+
+
+class TestBuildService:
+    def test_disables_discovery_file_cache_noise(self):
+        creds = Mock()
+        with (
+            patch("wayonagio_email_agent.gmail_client.load_credentials", return_value=creds),
+            patch("wayonagio_email_agent.gmail_client.build") as mock_build,
+        ):
+            gmail_client._build_service()
+
+        mock_build.assert_called_once_with(
+            "gmail", "v1", credentials=creds, cache_discovery=False
+        )
 
     def test_systemexit_when_token_missing(self, monkeypatch, tmp_path):
         token_path = tmp_path / "missing.json"

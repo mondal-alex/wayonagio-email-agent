@@ -53,8 +53,12 @@ def auth() -> None:
 def list_emails(max_results: int, query: str) -> None:
     """List recent emails matching a Gmail query.
 
-    Uses a single batched Gmail request to fetch header metadata for all
-    matched messages, instead of one ``messages.get`` call per message.
+    Each row shows message id, received time (UTC, from Gmail's
+    ``internalDate``), From, and Subject so duplicate senders are easy to
+    tell apart.
+
+    Uses batched ``messages.get`` calls (chunked under Gmail's per-user
+    concurrency cap), not one HTTP round-trip per message.
     """
     from wayonagio_email_agent import gmail_client
 
@@ -69,8 +73,9 @@ def list_emails(max_results: int, query: str) -> None:
         if "error" in row:
             click.echo(f"[{row['id']}] Error fetching details: {row['error']}")
             continue
+        when = row.get("received_at") or "—"
         click.echo(
-            f"[{row['id']}] From: {row['from_']!r}  Subject: {row['subject']!r}"
+            f"[{row['id']}] {when}  From: {row['from_']!r}  Subject: {row['subject']!r}"
         )
 
 

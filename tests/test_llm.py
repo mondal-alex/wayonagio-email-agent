@@ -10,8 +10,10 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import litellm
 import pytest
 
+from wayonagio_email_agent.llm import client as llm_client
 from wayonagio_email_agent.llm.client import (
     EmptyReplyError,
     _build_kwargs,
@@ -99,13 +101,21 @@ class TestGenerateReply:
     def test_returns_reply_text(self):
         expected = "Gentile cliente, grazie per la sua richiesta."
         with patch("wayonagio_email_agent.llm.client._chat", return_value=expected):
-            result = generate_reply("Vorrei informazioni sui tour", "it")
+            result = generate_reply(
+                thread_transcript="Vorrei informazioni sui tour",
+                subject="Tour inquiry",
+                language="it",
+            )
         assert result == expected
 
     def test_language_is_included_in_prompt(self):
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "reply"
-            generate_reply("Hello, I need info", "en")
+            generate_reply(
+                thread_transcript="Hello, I need info",
+                subject="Info request",
+                language="en",
+            )
             call_args = mock_chat.call_args[0][0]  # list of messages
             user_msg = next(m for m in call_args if m["role"] == "user")
             assert "English" in user_msg["content"]
@@ -113,30 +123,76 @@ class TestGenerateReply:
     def test_spanish_label_in_prompt(self):
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "respuesta"
-            generate_reply("Hola", "es")
+            generate_reply(
+                thread_transcript="Hola",
+                subject="Consulta",
+                language="es",
+            )
             call_args = mock_chat.call_args[0][0]
             user_msg = next(m for m in call_args if m["role"] == "user")
             assert "Spanish" in user_msg["content"]
 
+    def test_prompt_scopes_reply_to_latest_customer_turn(self):
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            generate_reply(
+                thread_transcript="OLD: Question about refunds\nOLD: Answer already given",
+                subject="Logistics",
+                language="it",
+                latest_customer_turn="NEW: Will the bus take us directly to the hotel?",
+            )
+            call_args = mock_chat.call_args[0][0]
+            user_msg = next(m for m in call_args if m["role"] == "user")
+            content = user_msg["content"]
+            assert "RESPONSE SCOPE" in content
+            assert "LATEST CUSTOMER TURN (primary task)" in content
+            assert "NEW: Will the bus take us directly to the hotel?" in content
+            assert "Do NOT re-answer questions" in content
+
     def test_empty_reply_raises_rather_than_drafting_blank(self):
         with patch("wayonagio_email_agent.llm.client._chat", return_value=""):
             with pytest.raises(EmptyReplyError):
-                generate_reply("Ciao", "it")
+                generate_reply(
+                    thread_transcript="Ciao",
+                    subject="Ciao",
+                    language="it",
+                )
 
     def test_whitespace_only_reply_raises(self):
         with patch("wayonagio_email_agent.llm.client._chat", return_value="   \n  \t"):
             with pytest.raises(EmptyReplyError):
-                generate_reply("Ciao", "it")
+                generate_reply(
+                    thread_transcript="Ciao",
+                    subject="Ciao",
+                    language="it",
+                )
 
     def test_forwards_generous_max_tokens_to_chat(self):
         """Regression: ensure the token cap is not silently lowered to a value
-        that would truncate a polite multi-paragraph travel reply."""
+        that would truncate a polite multi-paragraph travel reply (or burn the
+        whole budget on Gemini 2.5 internal thinking)."""
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "reply"
-            generate_reply("Ciao", "it")
+            generate_reply(
+                thread_transcript="Ciao",
+                subject="Ciao",
+                language="it",
+            )
 
         _, kwargs = mock_chat.call_args
-        assert kwargs["options"]["max_tokens"] >= 800
+        assert kwargs["options"]["max_tokens"] >= 4096
+
+    def test_reply_max_tokens_env_override(self, monkeypatch):
+        monkeypatch.setenv("LLM_MAX_REPLY_TOKENS", "2048")
+        with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
+            mock_chat.return_value = "reply"
+            generate_reply(
+                thread_transcript="Ciao",
+                subject="Ciao",
+                language="it",
+            )
+        _, kwargs = mock_chat.call_args
+        assert kwargs["options"]["max_tokens"] == 2048
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +214,7 @@ class TestGenerateReplyKBIntegration:
         from wayonagio_email_agent.kb import retrieve as kb_retrieve
         from wayonagio_email_agent.kb.store import ScoredChunk
 
+        captured_query: dict[str, str] = {}
         chunk = ScoredChunk(
             text="Machu Picchu tour costs $250/person.",
             source_id="sid",
@@ -166,14 +223,26 @@ class TestGenerateReplyKBIntegration:
             chunk_index=0,
             score=0.93,
         )
-        monkeypatch.setattr(kb_retrieve, "retrieve", lambda q, top_k=None: [chunk])
+
+        def fake_retrieve(query: str, top_k=None):
+            captured_query["value"] = query
+            return [chunk]
+
+        monkeypatch.setattr(kb_retrieve, "retrieve", fake_retrieve)
 
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "reply"
-            generate_reply("How much is Machu Picchu?", "en")
+            generate_reply(
+                thread_transcript="How much is Machu Picchu?",
+                subject="Machu Picchu",
+                language="en",
+            )
 
         messages = mock_chat.call_args[0][0]
         user = next(m for m in messages if m["role"] == "user")["content"]
+        assert "Subject: Machu Picchu" in captured_query["value"]
+        assert "Latest customer turn:" in captured_query["value"]
+        assert "Recent thread context" in captured_query["value"]
         assert "REFERENCE MATERIAL" in user
         assert "Tours / MachuPicchu.md" in user
         assert "Machu Picchu tour costs $250/person." in user
@@ -191,7 +260,11 @@ class TestGenerateReplyKBIntegration:
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "reply"
             with pytest.raises(kb_retrieve.KBUnavailableError):
-                generate_reply("Hello", "en")
+                generate_reply(
+                    thread_transcript="Hello",
+                    subject="Hello",
+                    language="en",
+                )
 
         mock_chat.assert_not_called()
 
@@ -246,7 +319,11 @@ class TestGenerateReplyExemplarIntegration:
 
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "reply"
-            generate_reply("Can I get a refund?", "en")
+            generate_reply(
+                thread_transcript="Can I get a refund?",
+                subject="Refund",
+                language="en",
+            )
 
         user = next(
             m for m in mock_chat.call_args[0][0] if m["role"] == "user"
@@ -260,9 +337,9 @@ class TestGenerateReplyExemplarIntegration:
         # Ordering contract — REFERENCE before EXAMPLE.
         ref_idx = user.index("--- REFERENCE MATERIAL ---")
         ex_idx = user.index("--- EXAMPLE RESPONSES ---")
-        client_idx = user.index("CLIENT EMAIL:")
+        client_idx = user.index("CLIENT EMAIL THREAD")
         assert ref_idx < ex_idx < client_idx, (
-            "Prompt block ordering must be REFERENCE → EXAMPLE → CLIENT EMAIL"
+            "Prompt block ordering must be REFERENCE → EXAMPLE → CLIENT EMAIL THREAD"
         )
 
         # KB-precedence framing must be present whenever exemplars are.
@@ -275,7 +352,11 @@ class TestGenerateReplyExemplarIntegration:
 
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "reply"
-            generate_reply("Hello", "en")
+            generate_reply(
+                thread_transcript="Hello",
+                subject="Hello",
+                language="en",
+            )
 
         user = next(
             m for m in mock_chat.call_args[0][0] if m["role"] == "user"
@@ -309,7 +390,11 @@ class TestGenerateReplyExemplarIntegration:
 
         with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
             mock_chat.return_value = "reply"
-            generate_reply("Hello", "en")
+            generate_reply(
+                thread_transcript="Hello",
+                subject="Hello",
+                language="en",
+            )
 
         user = next(
             m for m in mock_chat.call_args[0][0] if m["role"] == "user"
@@ -348,7 +433,11 @@ class TestGenerateReplyExemplarIntegration:
         ):
             with patch("wayonagio_email_agent.llm.client._chat") as mock_chat:
                 mock_chat.return_value = "reply"
-                result = generate_reply("Hello", "en")
+                result = generate_reply(
+                    thread_transcript="Hello",
+                    subject="Hello",
+                    language="en",
+                )
 
         assert result == "reply"
         # KB block still present, exemplar block omitted entirely.
@@ -389,6 +478,7 @@ class TestChatTruncationWarning:
 
         messages = [r.getMessage() for r in caplog.records]
         assert any("truncated" in m.lower() for m in messages)
+        assert any("LLM_MAX_REPLY_TOKENS" in m for m in messages)
 
     def test_does_not_warn_on_normal_stop(self, monkeypatch, caplog):
         monkeypatch.setenv("LLM_MODEL", "ollama/llama3.2")
@@ -401,6 +491,67 @@ class TestChatTruncationWarning:
 
         messages = [r.getMessage() for r in caplog.records]
         assert not any("truncated" in m.lower() for m in messages)
+
+
+class TestChatTransientRetry:
+    """Gemini intermittently returns 503 UNAVAILABLE (capacity); we must retry."""
+
+    def test_recovers_from_service_unavailable(self, monkeypatch):
+        monkeypatch.setenv("LLM_MODEL", "gemini/gemini-2.5-flash")
+        monkeypatch.setenv("GEMINI_API_KEY", "sk-test")
+        calls = {"n": 0}
+        sleeps: list[float] = []
+
+        def fake_completion(**kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise litellm.ServiceUnavailableError(
+                    "503 UNAVAILABLE", "gemini", "gemini/gemini-2.5-flash"
+                )
+            return _fake_litellm_response("complete reply", "stop")
+
+        monkeypatch.setattr(llm_client.litellm, "completion", fake_completion)
+        monkeypatch.setattr(llm_client.time, "sleep", lambda s: sleeps.append(s))
+
+        out = _chat([{"role": "user", "content": "hi"}])
+        assert out == "complete reply"
+        assert calls["n"] == 3
+        assert sleeps == [3.0, 6.0]
+
+    def test_respects_llm_chat_max_retries_env(self, monkeypatch):
+        monkeypatch.setenv("LLM_MODEL", "gemini/gemini-2.5-flash")
+        monkeypatch.setenv("GEMINI_API_KEY", "sk-test")
+        monkeypatch.setenv("LLM_CHAT_MAX_RETRIES", "1")
+        sleeps: list[float] = []
+
+        def always_503(**kwargs):
+            raise litellm.ServiceUnavailableError(
+                "503", "gemini", "gemini/gemini-2.5-flash"
+            )
+
+        monkeypatch.setattr(llm_client.litellm, "completion", always_503)
+        monkeypatch.setattr(llm_client.time, "sleep", lambda s: sleeps.append(s))
+
+        with pytest.raises(litellm.ServiceUnavailableError):
+            _chat([{"role": "user", "content": "hi"}])
+
+        assert len(sleeps) == 1
+
+    def test_non_transient_errors_fail_fast(self, monkeypatch):
+        monkeypatch.setenv("LLM_MODEL", "gemini/gemini-2.5-flash")
+        monkeypatch.setenv("GEMINI_API_KEY", "sk-test")
+        calls = {"n": 0}
+
+        def boom(**kwargs):
+            calls["n"] += 1
+            raise RuntimeError("not transient")
+
+        monkeypatch.setattr(llm_client.litellm, "completion", boom)
+        monkeypatch.setattr(llm_client.time, "sleep", lambda s: None)
+
+        with pytest.raises(RuntimeError, match="not transient"):
+            _chat([{"role": "user", "content": "hi"}])
+        assert calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------

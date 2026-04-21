@@ -8,12 +8,16 @@ We batch requests because every embedding provider accepts batched input and
 it's dramatically cheaper / faster than one request per chunk. The default
 batch size is provider-aware, though: Gemini's ``gemini-embedding-001`` is
 primarily designed for single-input ``embedContent`` calls (the synchronous
-``batchEmbedContents`` endpoint LiteLLM uses is not even listed in the model's
-``supportedGenerationMethods``) and the free tier caps at ≈30k TPM, so a
-64-chunk batch at ≈500 tokens per chunk is already over budget and reliably
-429s. For Gemini we default to much smaller batches with inter-batch pacing;
-for Ollama and other self-hosted providers with no rate limit we keep the
-large default.
+``batchEmbedContents`` endpoint LiteLLM uses is not even listed in the
+model's ``supportedGenerationMethods``) and the free tier enforces a rolling
+1-minute quota that trips well before a full-corpus batch would fit. For
+Gemini we default to small batches (4 chunks) *and* inter-batch pacing
+(8s) so sustained throughput stays under the free-tier ceiling. Ollama and
+other self-hosted providers with no rate limit keep the large default.
+
+If you're on Tier 1+ (billing enabled), zero out the pacing and raise the
+batch size via env vars — quotas are an order of magnitude higher and the
+conservative defaults just slow things down.
 """
 
 from __future__ import annotations
@@ -36,28 +40,35 @@ _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 # and go get coffee" ingest succeeds on the defaults. Paid-tier users with
 # higher quotas can raise via ``KB_EMBED_BATCH_SIZE``.
 _BATCH_SIZE_BY_PROVIDER = {
-    # ≈4 chunks × ≈500 tokens = ≈2k tokens/batch, well under 30k TPM even
-    # if other usage is happening. 64 chunks ÷ 4 = 16 batches.
+    # ≈4 chunks × ≈500 tokens = ≈2k tokens/batch. Small enough that a
+    # *single* request is never the thing that blows TPM; combined with the
+    # pacing below, total throughput stays under the free-tier ceiling.
     "gemini": 4,
 }
 _DEFAULT_BATCH_SIZE = 64
 
-# Inter-batch pacing. Sleeping briefly between successful batches keeps the
-# cumulative TPM/RPM from spiking inside a single 60-second window. Gemini
-# free tier: 100 RPM, 30k TPM — at batch_size=4 and avg 500 tokens, a 3s
-# pace yields ≤20 req/min and ≤10k tokens/min, comfortably under both caps.
-# Providers with no rate limit get zero overhead.
+# Inter-batch pacing. The free tier on ``gemini-embedding-001`` enforces a
+# rolling 1-minute window; empirically 3s pacing was fast enough to
+# accumulate over the ceiling by batch ~11 of a 16-batch run. 8s pacing at
+# batch_size=4 ⇒ 7.5 RPM and ≤15k TPM — that's inside even the tightest
+# observed free-tier numbers, with headroom for other project traffic.
+# Ingest of ~100 chunks takes roughly 3–4 minutes on free tier, fine for
+# a yearly operation; Tier 1+ users should zero this out.
 _INTER_BATCH_SLEEP_BY_PROVIDER = {
-    "gemini": 3.0,
+    "gemini": 8.0,
 }
 _DEFAULT_INTER_BATCH_SLEEP = 0.0
 
-# Retry policy for rate-limit (HTTP 429) responses. A brief quota burst is
-# common on free tier during yearly ingest; we back off and retry rather
-# than aborting the whole run. Non-rate-limit errors still fail fast
-# because retrying them just delays the inevitable.
+# Retry policy for rate-limit (HTTP 429) responses. Gemini's quota is
+# measured over a rolling 1-minute window, so short retries can't help —
+# they just consume more quota inside the same already-exhausted minute.
+# We start at 30s (half a window, enough to let some of the older usage
+# age out) and double up to 60s. If five 30→60s retries can't clear the
+# window, the problem is RPD exhaustion or persistent quota throttling,
+# which no amount of in-process waiting fixes — the caller needs to
+# upgrade to Tier 1 or wait until midnight Pacific (when RPD resets).
 _DEFAULT_MAX_RATE_LIMIT_RETRIES = 5
-_INITIAL_BACKOFF_SECONDS = 5.0
+_INITIAL_BACKOFF_SECONDS = 30.0
 _MAX_BACKOFF_SECONDS = 60.0
 
 

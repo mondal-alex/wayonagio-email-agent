@@ -41,6 +41,14 @@ _FAKE_MESSAGE = {"id": "msg-001", "threadId": "thread-001", "payload": {}}
 # ---------------------------------------------------------------------------
 
 class TestManualDraftFlow:
+    @pytest.fixture(autouse=True)
+    def _stub_thread_transcript(self, monkeypatch):
+        monkeypatch.setattr(
+            agent.gmail_client,
+            "build_thread_transcript",
+            lambda **kwargs: "THREAD CONTEXT",
+        )
+
     def test_creates_draft(self):
         with (
             patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=_FAKE_MESSAGE),
@@ -68,7 +76,12 @@ class TestManualDraftFlow:
             mock_gen.return_value = "Respuesta"
             manual_draft_flow("msg-001")
 
-        mock_gen.assert_called_once_with(original=_FAKE_PARTS["body"], language="es")
+        mock_gen.assert_called_once_with(
+            thread_transcript="THREAD CONTEXT",
+            subject=_FAKE_PARTS["subject"],
+            language="es",
+            latest_customer_turn=_FAKE_PARTS["body"],
+        )
 
     def test_uses_subject_when_body_empty(self):
         parts_no_body = {**_FAKE_PARTS, "body": ""}
@@ -81,8 +94,7 @@ class TestManualDraftFlow:
         ):
             manual_draft_flow("msg-001")
 
-        # detect_language called with subject (fallback) not empty body
-        mock_detect.assert_called_once_with(_FAKE_PARTS["subject"])
+        mock_detect.assert_called_once_with("THREAD CONTEXT")
 
     def test_forced_language_skips_detection(self):
         with (
@@ -95,7 +107,12 @@ class TestManualDraftFlow:
             manual_draft_flow("msg-001", forced_language="es")
 
         mock_detect.assert_not_called()
-        mock_generate.assert_called_once_with(original=_FAKE_PARTS["body"], language="es")
+        mock_generate.assert_called_once_with(
+            thread_transcript="THREAD CONTEXT",
+            subject=_FAKE_PARTS["subject"],
+            language="es",
+            latest_customer_turn=_FAKE_PARTS["body"],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +120,14 @@ class TestManualDraftFlow:
 # ---------------------------------------------------------------------------
 
 class TestProcessMessage:
+    @pytest.fixture(autouse=True)
+    def _stub_thread_transcript(self, monkeypatch):
+        monkeypatch.setattr(
+            agent.gmail_client,
+            "build_thread_transcript",
+            lambda **kwargs: "THREAD CONTEXT",
+        )
+
     def test_skips_already_processed(self):
         with (
             patch("wayonagio_email_agent.agent.state.is_processed", return_value=True),
@@ -187,7 +212,12 @@ class TestProcessMessage:
         ):
             _process_message("msg-001", dry_run=False)
 
-        mock_generate.assert_called_once_with(original=_FAKE_PARTS["subject"], language="en")
+        mock_generate.assert_called_once_with(
+            thread_transcript="THREAD CONTEXT",
+            subject=_FAKE_PARTS["subject"],
+            language="en",
+            latest_customer_turn=_FAKE_PARTS["subject"],
+        )
 
     def test_draft_lookup_error_does_not_create_draft(self):
         with (
@@ -400,9 +430,11 @@ class TestDraftOnlyInvariant:
 
     def test_manual_flow_never_calls_send(self):
         service = self._build_fake_service()
-        service.users().messages().get.return_value.execute.return_value = (
-            self._fake_message_payload()
-        )
+        fake_message = self._fake_message_payload()
+        service.users().messages().get.return_value.execute.return_value = fake_message
+        service.users().threads().get.return_value.execute.return_value = {
+            "messages": [fake_message]
+        }
         service.users().drafts().create.return_value.execute.return_value = {
             "id": "draft-abc"
         }

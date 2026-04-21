@@ -106,7 +106,12 @@ class TestProviderAwareDefaults:
             model="gemini/gemini-embedding-001",
         )
         assert call_sizes == [4, 4, 2]
-        assert sleeps == [3.0, 3.0]
+        # Pacing is pinned to the Gemini-free-tier-safe default; if this ever
+        # drops below ~6s the free-tier rolling 1-minute quota starts tripping
+        # sporadically mid-run (seen empirically around batch 11/16 at 3s).
+        expected_pace = embed._INTER_BATCH_SLEEP_BY_PROVIDER["gemini"]
+        assert expected_pace >= 6.0
+        assert sleeps == [expected_pace, expected_pace]
 
     def test_ollama_keeps_large_batches_and_no_pacing(self, monkeypatch):
         monkeypatch.setenv("OLLAMA_BASE_URL", "http://fake:11434")
@@ -206,8 +211,10 @@ class TestProviderAwareDefaults:
 class TestRateLimitRetry:
     """Rate-limit (429) recovery is a load-bearing property of ingest:
     Gemini free-tier quotas are tight enough that a real yearly corpus
-    *will* trip them for a minute at a time, and we must not abort the
-    whole run when that happens.
+    *will* trip them, and we must not abort the whole run when that
+    happens. The initial backoff is deliberately long (30s) because the
+    quota is measured over a rolling 1-minute window — retries shorter
+    than that can't help and just consume more quota.
     """
 
     def _rate_limit_error(self):
@@ -237,8 +244,8 @@ class TestRateLimitRetry:
         result = embed.embed_texts(["a"], model="ollama/any")
         assert result.shape == (1, 1)
         assert calls["n"] == 3
-        # Exponential backoff: 5, 10, ...
-        assert sleeps == [5.0, 10.0]
+        # Exponential backoff: 30, 60, ... (capped at 60).
+        assert sleeps == [30.0, 60.0]
 
     def test_respects_max_retries_env_var(self, monkeypatch):
         monkeypatch.setenv("KB_EMBED_MAX_RETRIES", "2")
@@ -253,7 +260,7 @@ class TestRateLimitRetry:
         with pytest.raises(litellm.RateLimitError):
             embed.embed_texts(["a"], model="ollama/any")
 
-        # 2 retries => 2 sleeps (5, 10), then the third attempt raises.
+        # 2 retries => 2 sleeps, then the third attempt raises.
         assert len(sleeps) == 2
 
     def test_non_rate_limit_errors_fail_fast(self, monkeypatch):
@@ -272,6 +279,30 @@ class TestRateLimitRetry:
             embed.embed_texts(["a"], model="ollama/any")
         assert calls["n"] == 1
 
+    def test_backoff_starts_long_enough_to_clear_rolling_window(self, monkeypatch):
+        """The Gemini free-tier quota is a rolling 1-minute window. If the
+        first retry sleeps less than ~30 seconds the window is still full
+        and the retry just burns more quota. Pin the initial backoff so a
+        well-meaning refactor can't quietly reintroduce the old 5s sleep.
+        """
+        monkeypatch.setenv("KB_EMBED_MAX_RETRIES", "1")
+        sleeps: list[float] = []
+
+        def always_rate_limited(**kwargs):
+            raise self._rate_limit_error()
+
+        monkeypatch.setattr(embed.litellm, "embedding", always_rate_limited)
+        monkeypatch.setattr(embed.time, "sleep", lambda s: sleeps.append(s))
+
+        with pytest.raises(litellm.RateLimitError):
+            embed.embed_texts(["a"], model="ollama/any")
+
+        assert sleeps == [30.0]
+        assert sleeps[0] >= 30.0, (
+            "Initial backoff must be long enough to let a rolling 1-minute "
+            "quota window start aging out."
+        )
+
     def test_backoff_is_capped(self, monkeypatch):
         """Exponential backoff must cap at _MAX_BACKOFF_SECONDS so a
         pathologically-long rate-limit window doesn't produce absurd sleeps."""
@@ -287,8 +318,8 @@ class TestRateLimitRetry:
         with pytest.raises(litellm.RateLimitError):
             embed.embed_texts(["a"], model="ollama/any")
 
-        assert sleeps[0] == 5.0
-        # All delays must be within the cap; later ones saturate at 60.
+        assert sleeps[0] == embed._INITIAL_BACKOFF_SECONDS
+        # All delays must be within the cap; later ones saturate.
         assert max(sleeps) == embed._MAX_BACKOFF_SECONDS
         assert all(s <= embed._MAX_BACKOFF_SECONDS for s in sleeps)
 

@@ -30,12 +30,38 @@ from wayonagio_email_agent import gmail_client, state
 from wayonagio_email_agent.llm import client as llm
 
 logger = logging.getLogger(__name__)
+_DEFAULT_THREAD_MAX_CHARS = 48_000
+_MIN_THREAD_MAX_CHARS = 1_000
 
 
 def scanner_enabled() -> bool:
     """Return whether automatic scanning is enabled via configuration."""
     value = os.environ.get("SCANNER_ENABLED", "false").strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _thread_max_chars() -> int:
+    """Resolve ``LLM_THREAD_MAX_CHARS`` with defaults and minimum clamp."""
+    raw = os.environ.get("LLM_THREAD_MAX_CHARS", "").strip()
+    if not raw:
+        return _DEFAULT_THREAD_MAX_CHARS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "LLM_THREAD_MAX_CHARS=%r is not an integer; using default %d.",
+            raw,
+            _DEFAULT_THREAD_MAX_CHARS,
+        )
+        return _DEFAULT_THREAD_MAX_CHARS
+    if value < _MIN_THREAD_MAX_CHARS:
+        logger.warning(
+            "LLM_THREAD_MAX_CHARS=%d is below minimum %d; clamping.",
+            value,
+            _MIN_THREAD_MAX_CHARS,
+        )
+        return _MIN_THREAD_MAX_CHARS
+    return value
 
 
 def manual_draft_flow(message_id: str, forced_language: str | None = None) -> dict:
@@ -50,8 +76,13 @@ def manual_draft_flow(message_id: str, forced_language: str | None = None) -> di
 
     message = gmail_client.get_message(message_id)
     parts = gmail_client.extract_message_parts(message)
+    transcript = gmail_client.build_thread_transcript(
+        thread_id=parts["thread_id"],
+        anchor_message_id=message_id,
+        max_chars=_thread_max_chars(),
+    )
 
-    body_text = parts["body"] or parts["subject"]
+    body_text = transcript
     if forced_language:
         language = forced_language
         logger.debug("Using forced language from caller: %s", language)
@@ -59,7 +90,12 @@ def manual_draft_flow(message_id: str, forced_language: str | None = None) -> di
         language = llm.detect_language(body_text)
         logger.debug("Detected language: %s", language)
 
-    reply_body = llm.generate_reply(original=body_text, language=language)
+    reply_body = llm.generate_reply(
+        thread_transcript=transcript,
+        subject=parts["subject"],
+        language=language,
+        latest_customer_turn=parts["body"] or parts["subject"],
+    )
 
     draft = gmail_client.draft_reply(
         thread_id=parts["thread_id"],
@@ -132,9 +168,14 @@ def _process_message(message_id: str, dry_run: bool) -> None:
 
     message = gmail_client.get_message(message_id)
     parts = gmail_client.extract_message_parts(message)
+    transcript = gmail_client.build_thread_transcript(
+        thread_id=parts["thread_id"],
+        anchor_message_id=message_id,
+        max_chars=_thread_max_chars(),
+    )
 
     related, language = llm.is_travel_related(
-        subject=parts["subject"], body=parts["body"]
+        subject=parts["subject"], body=transcript
     )
     if not related:
         logger.debug("Message %s is not travel-related, skipping.", message_id)
@@ -151,8 +192,12 @@ def _process_message(message_id: str, dry_run: bool) -> None:
         state.mark_processed(message_id, outcome="thread_has_draft")
         return
 
-    reply_source = parts["body"] or parts["subject"]
-    reply_body = llm.generate_reply(original=reply_source, language=language)
+    reply_body = llm.generate_reply(
+        thread_transcript=transcript,
+        subject=parts["subject"],
+        language=language,
+        latest_customer_turn=parts["body"] or parts["subject"],
+    )
 
     if dry_run:
         logger.info(
