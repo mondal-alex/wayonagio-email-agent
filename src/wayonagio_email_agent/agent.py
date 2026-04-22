@@ -76,9 +76,12 @@ def manual_draft_flow(message_id: str, forced_language: str | None = None) -> di
 
     message = gmail_client.get_message(message_id)
     parts = gmail_client.extract_message_parts(message)
+    # Gmail add-ons may pass a client-style id (e.g. msg-f:...); thread payloads
+    # use the API's canonical id, so anchor transcript lookup on message["id"].
+    anchor_id = message["id"]
     transcript = gmail_client.build_thread_transcript(
         thread_id=parts["thread_id"],
-        anchor_message_id=message_id,
+        anchor_message_id=anchor_id,
         max_chars=_thread_max_chars(),
     )
 
@@ -168,9 +171,10 @@ def _process_message(message_id: str, dry_run: bool) -> None:
 
     message = gmail_client.get_message(message_id)
     parts = gmail_client.extract_message_parts(message)
+    anchor_id = message["id"]
     transcript = gmail_client.build_thread_transcript(
         thread_id=parts["thread_id"],
-        anchor_message_id=message_id,
+        anchor_message_id=anchor_id,
         max_chars=_thread_max_chars(),
     )
 

@@ -13,13 +13,13 @@ Use this flow to test Phase 1 locally with your own Gmail account. This keeps th
 5. Still in the Library, search for **Google Drive API** and enable it. The agent reads agency content out of Drive to build the knowledge base.
 6. Open **APIs & Services → OAuth consent screen**.
 7. Choose the **User type**. This decision matters — read before you click:
-    - **Internal** — pick this if your Google Cloud project is owned by a Google Workspace organization (e.g. `@wayonagio.com` managed via Workspace). Verify by opening **IAM & Admin → Settings**: if the **Organization** field shows a domain, the Internal radio button will be enabled. This is the right choice for a Workspace-hosted agency: anyone in the domain can authorize the app, nobody outside can, no test-user list is needed, no "unverified app" warning, and **refresh tokens don't expire** — the Cloud Run scanner can run unattended indefinitely.
+  - **Internal** — pick this if your Google Cloud project is owned by a Google Workspace organization (e.g. `@wayonagio.com` managed via Workspace). Verify by opening **IAM & Admin → Settings**: if the **Organization** field shows a domain, the Internal radio button will be enabled. This is the right choice for a Workspace-hosted agency: anyone in the domain can authorize the app, nobody outside can, no test-user list is needed, no "unverified app" warning, and **refresh tokens don't expire** — the Cloud Run scanner can run unattended indefinitely.
     - **External** — this is your only option if the project has no Workspace organization (a personal `@gmail.com` account, for example). While the app is in **Testing** status, External is capped at 100 test users and Google **rotates OAuth refresh tokens every 7 days**. That's fine for local dev, but for production you'll need to either (a) move the project into a Google Workspace tenant, or (b) publish the OAuth app (brand verification + homepage; not a full security audit for our scope list).
 8. **If you picked External:** keep publishing status as **Testing**, and add your own Gmail address as a **Test user**.
-    - If your account is not listed as a test user, OAuth login will fail with `Error 403: access_denied`.
+  - If your account is not listed as a test user, OAuth login will fail with `Error 403: access_denied`.
     - **If you picked Internal:** skip this step — there is no test-user list.
 9. Open **OAuth consent screen / Data access** and add exactly these scopes:
-    - `https://www.googleapis.com/auth/gmail.readonly`
+  - `https://www.googleapis.com/auth/gmail.readonly`
     - `https://www.googleapis.com/auth/gmail.compose`
     - `https://www.googleapis.com/auth/drive.readonly`
 10. Open **APIs & Services → Credentials**.
@@ -39,7 +39,7 @@ Lowest-friction path. No local model to pull, no extra process to keep running, 
 1. Go to [Google AI Studio → API keys](https://aistudio.google.com/app/apikey).
 2. Create an API key (the free tier is generous enough for local testing).
 3. Keep note of:
-    - `LLM_MODEL=gemini/gemini-2.5-flash`
+  - `LLM_MODEL=gemini/gemini-2.5-flash`
     - `GEMINI_API_KEY=<your-api-key>`
 
 No server to start — `litellm` calls the Gemini HTTP API directly.
@@ -55,19 +55,19 @@ Pick this if you want the LLM to run fully on your machine with no outbound LLM 
 ollama serve
 ```
 
-3. In a second terminal, download a model, for example:
+1. In a second terminal, download a model, for example:
 
 ```bash
 ollama pull llama3.2
 ```
 
-4. Keep note of:
-    - `LLM_MODEL=ollama/llama3.2`
+1. Keep note of:
+  - `LLM_MODEL=ollama/llama3.2`
     - `OLLAMA_BASE_URL=http://localhost:11434`
 
 ## 3. Configure the app
 
-Copy [`.env.example`](../.env.example) to `.env`:
+Copy `[.env.example](../.env.example)` to `.env`:
 
 ```bash
 cp .env.example .env
@@ -88,7 +88,7 @@ If you picked **Option A (Gemini)** in step 2:
 
 - `LLM_MODEL=gemini/gemini-2.5-flash`
 - `GEMINI_API_KEY=<your-api-key>`
-- Comment out or leave blank the `OLLAMA_*` lines — they're ignored whenever `LLM_MODEL` starts with `gemini/`.
+- Comment out or leave blank the `OLLAMA_`* lines — they're ignored whenever `LLM_MODEL` starts with `gemini/`.
 
 If you picked **Option B (Ollama)** in step 2:
 
@@ -101,11 +101,9 @@ If you picked **Option B (Ollama)** in step 2:
 The KB is a **hard dependency** — every draft must be grounded in agency content, so `cli draft-reply` and the API both fail with `Knowledge base unavailable` until the KB is populated. Wire it up before moving on:
 
 1. **Pick a Drive folder** that contains real agency material (tour descriptions, FAQs, templates). One or two Google Docs or PDFs is enough for local testing. Copy the folder ID from the URL (`https://drive.google.com/drive/folders/<id>`) or the full share URL — the app accepts either.
-
 2. **Get a Gemini API key for embeddings.** Embeddings default to `gemini/gemini-embedding-001` because Google AI Studio hands out free-tier keys and the dimensionality matches what production uses. If you're already on Option A, reuse the same `GEMINI_API_KEY`. If you're on Option B and want to stay fully offline, set `KB_EMBEDDING_MODEL` to an Ollama embedding model such as `ollama/nomic-embed-text` (you'll also need to `ollama pull` it).
-
 3. **Add these to `.env`:**
-    - `KB_RAG_FOLDER_IDS=<folder-id-or-share-url>`
+  - `KB_RAG_FOLDER_IDS=<folder-id-or-share-url>`
     - `KB_LOCAL_DIR=./kb_artifacts` (dev fallback; production uses `KB_GCS_URI`)
     - `KB_EMBEDDING_MODEL=gemini/gemini-embedding-001`
     - `GEMINI_API_KEY=<your-aistudio-key>` (same key you set for the LLM if you're on Option A)
@@ -114,7 +112,7 @@ You'll actually populate the index in step 4 below, after `cli auth` has produce
 
 ### Exemplars (optional, skip for Phase 1)
 
-`.env.example` also exposes a `KB_EXEMPLAR_FOLDER_IDS` entry. Leave it commented out for Phase 1 — exemplars are an opt-in voice/style feature layered on top of the KB, and drafting works fine without them. When you're ready to enable curator-written example replies (typically after the first week of real usage, when the agency has opinions on what good drafts look like), follow [`src/wayonagio_email_agent/exemplars/README.md`](../src/wayonagio_email_agent/exemplars/README.md) — it covers the curator contract, Drive folder layout, PII handling, and the refresh story.
+`.env.example` also exposes a `KB_EXEMPLAR_FOLDER_IDS` entry. Leave it commented out for Phase 1 — exemplars are an opt-in voice/style feature layered on top of the KB, and drafting works fine without them. When you're ready to enable curator-written example replies (typically after the first week of real usage, when the agency has opinions on what good drafts look like), follow `[src/wayonagio_email_agent/exemplars/README.md](../src/wayonagio_email_agent/exemplars/README.md)` — it covers the curator contract, Drive folder layout, PII handling, and the refresh story.
 
 ## 4. Install dependencies and authenticate with Gmail
 
@@ -128,6 +126,7 @@ The `auth` command opens a browser, asks you to sign in with your test Gmail acc
 If you change scopes later, delete `token.json` and run `cli auth` again so OAuth consent is refreshed with the updated scopes.
 
 If you get `Error 403: access_denied`, verify all of the following:
+
 - OAuth app is still in **Testing** (not published).
 - The Gmail account you used to sign in is added under **OAuth consent screen / Audience → Test users**.
 - You are using the same project/client that generated your `credentials.json`.
@@ -145,9 +144,9 @@ uv run python -m wayonagio_email_agent.cli kb-doctor
 
 You want to see `KB status: HEALTHY` and a non-zero chunk count before moving on. Common failures and fixes:
 
-- **`KBConfigError: KB_RAG_FOLDER_IDS is required`** — you haven't set the env var yet. Re-check step 3.
+- `**KBConfigError: KB_RAG_FOLDER_IDS is required**` — you haven't set the env var yet. Re-check step 3.
 - **Drive `403` / `insufficientPermissions`** — either the Drive API isn't enabled on your Cloud project (step 1 #5) or your `token.json` was issued before you added the `drive.readonly` scope. Delete `token.json` and re-run `cli auth` so OAuth re-prompts with the full scope set.
-- **`KBUnavailableError: KB index ... is empty`** — the folder exists but contained no readable files (Google Sheets, Slides, and Forms are intentionally skipped). Drop a `.pdf`, Google Doc, `.txt`, or `.md` into the folder and re-ingest.
+- `**KBUnavailableError: KB index ... is empty**` — the folder exists but contained no readable files (Google Sheets, Slides, and Forms are intentionally skipped). Drop a `.pdf`, Google Doc, `.txt`, or `.md` into the folder and re-ingest.
 - **Gemini `401` / `quota exceeded`** — `GEMINI_API_KEY` is wrong or exhausted. Grab a fresh key at [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey).
 
 Re-run `kb-ingest` whenever you edit the source docs — the runtime caches the index in-process, but a second `kb-ingest` publishes a new artifact and the next `uvicorn` restart picks it up. For local testing, restarting the server is the easiest way to force a reload.
@@ -164,6 +163,21 @@ uv run python -m wayonagio_email_agent.cli list
 uv run python -m wayonagio_email_agent.cli list --max 50
 ```
 
+**Find a specific email by sender (to get its `message_id`).** The `list` command uses Gmail’s search box syntax via `--query` / `-q` (default `is:unread`). A custom `-q` **replaces** that default — add `is:unread` yourself if you still only want unread mail. Narrow the results with `from:`, then read the id from the first column of each line (`[message_id] …`).
+
+```bash
+# By email address (most reliable)
+uv run python -m wayonagio_email_agent.cli list -q "from:customer@example.com" --max 20
+
+# By display name (Gmail matches the “From” name)
+uv run python -m wayonagio_email_agent.cli list -q "from:Marco" --max 20
+
+# Combine with other operators: unread only, newer than a date, subject hint
+uv run python -m wayonagio_email_agent.cli list -q "from:wayonagio is:unread" --max 30
+```
+
+If nothing comes back, widen the query: drop `is:unread` (the default) by passing an explicit query such as `-q "from:alice@example.com newer_than:7d"`, or search the whole mailbox with `-q "from:bob@example.com in:anywhere"`. When several rows match, use **time + subject** in the CLI output to pick the right one, then copy the bracketed `message_id` into `draft-reply`.
+
 Pick a `message_id`, then create a draft reply:
 
 ```bash
@@ -171,6 +185,7 @@ uv run python -m wayonagio_email_agent.cli draft-reply <message_id>
 ```
 
 Open Gmail and confirm:
+
 - a draft was created,
 - it appears in the correct thread,
 - the reply reflects the whole thread context (first contact through the target message), not just the latest line,
@@ -197,18 +212,18 @@ If the response includes a draft ID and a draft appears in Gmail, the API path i
 
 ## 7. Test the Gmail Add-on against your local machine
 
-Google Apps Script cannot call `localhost` directly, so expose your local API with a public HTTPS tunnel such as `ngrok` or `cloudflared`.
+*Google Apps Script cannot call* `localhost` *directly, so expose your local API with a public HTTPS tunnel such as* `ngrok` *or* `cloudflared`*.*
 
-Typical flow:
+*Typical flow:*
 
-1. Start the API locally on port `8000`.
-2. Start a tunnel that forwards to `http://127.0.0.1:8000`.
-3. Copy the public HTTPS URL from the tunnel.
-4. Go to [script.google.com](https://script.google.com/).
+1. *Start the API locally on port* `8000`*.*
+2. *Start a tunnel that forwards to* `http://127.0.0.1:8000`*.*
+3. *Copy the public HTTPS URL from the tunnel.*
+4. *Go to [script.google.com](https://script.google.com/).*
 5. Create a new Apps Script project.
-6. Copy in the contents of [`addon/Code.gs`](../addon/Code.gs) and [`addon/appsscript.json`](../addon/appsscript.json). See [Viewing `appsscript.json` in the editor](#viewing-appsscriptjson-in-the-editor) below if you don't see the manifest file.
+6. Copy in the contents of `[addon/Code.gs](../addon/Code.gs)` and `[addon/appsscript.json](../addon/appsscript.json)`. See [Viewing `appsscript.json` in the editor](#viewing-appsscriptjson-in-the-editor) below if you don't see the manifest file.
 7. In **Project Settings → Script Properties**, set:
-    - `BACKEND_URL=<your public tunnel URL>`
+  - `BACKEND_URL=<your public tunnel URL>`
     - `BEARER_TOKEN=<AUTH_BEARER_TOKEN from .env>`
 8. Deploy it as a Google Workspace Add-on. See [Deploying the Add-on for testing](#deploying-the-add-on-for-testing) below for detailed steps.
 9. Install it for your test account (done as part of the deployment flow below).
@@ -218,12 +233,14 @@ You should see a notification in Gmail and a new draft should appear in the thre
 
 ### Choosing a tunnel: `cloudflared` vs `ngrok`
 
-| | `cloudflared` (quick tunnel) | `ngrok` |
-|---|---|---|
-| Signup required | No | Yes (free account) |
-| Setup speed | Fastest | Fast after signup |
-| Free stable URL | Only with a named tunnel (requires a domain on Cloudflare) | Reserved domains on paid plans |
-| Request inspector | No | Yes, at `http://127.0.0.1:4040` |
+
+|                   | `cloudflared` (quick tunnel)                               | `ngrok`                         |
+| ----------------- | ---------------------------------------------------------- | ------------------------------- |
+| Signup required   | No                                                         | Yes (free account)              |
+| Setup speed       | Fastest                                                    | Fast after signup               |
+| Free stable URL   | Only with a named tunnel (requires a domain on Cloudflare) | Reserved domains on paid plans  |
+| Request inspector | No                                                         | Yes, at `http://127.0.0.1:4040` |
+
 
 For quick end-to-end testing, `cloudflared` is the lowest-friction option. For ongoing development where you want to see each request the Add-on makes, `ngrok` is easier to debug.
 
@@ -257,7 +274,7 @@ Apps Script hides the manifest file by default. To edit it:
 1. In the Apps Script editor, click the **gear icon** (⚙️ Project Settings) in the left sidebar.
 2. Check **"Show 'appsscript.json' manifest file in editor"**.
 3. Go back to the **Editor** (`<>` icon in the left sidebar).
-4. `appsscript.json` now appears alongside `Code.gs` in the Files panel. Paste in the contents of [`addon/appsscript.json`](../addon/appsscript.json).
+4. `appsscript.json` now appears alongside `Code.gs` in the Files panel. Paste in the contents of `[addon/appsscript.json](../addon/appsscript.json)`.
 
 ### Deploying the Add-on for testing
 
@@ -324,7 +341,7 @@ You do **not** need to publish to the Google Workspace Marketplace for internal 
 
 ### Optional: sync the Add-on from this repo with `clasp`
 
-Apps Script has no native GitHub integration, but Google's [`clasp`](https://github.com/google/clasp) CLI lets you push the files in this repo straight into your Apps Script project so you don't have to copy-paste after every edit.
+Apps Script has no native GitHub integration, but Google's `[clasp](https://github.com/google/clasp)` CLI lets you push the files in this repo straight into your Apps Script project so you don't have to copy-paste after every edit.
 
 Install and sign in:
 
@@ -351,9 +368,11 @@ clasp push
 ## 8. Recommended checks
 
 Verify these before moving beyond local testing:
+
 - Drafts are created, never sent.
 - Replies stay in the original Gmail thread.
 - Language detection looks reasonable for Italian, Spanish, and English emails.
 - Invalid bearer tokens are rejected.
 - `SCANNER_ENABLED=false` prevents the automatic scanner from starting.
 - `cli kb-doctor` reports `HEALTHY` and a sensible chunk count — and the drafted replies visibly reflect content from your Drive folder (a tour description you recognize, a phrase from an FAQ). If drafts look generic, the KB isn't actually being consulted: re-check `KB_RAG_FOLDER_IDS`, re-run `kb-ingest`, and restart the API.
+

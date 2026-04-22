@@ -170,6 +170,11 @@ def kb_ingest() -> None:
     """
     from wayonagio_email_agent.kb import ingest
 
+    click.echo(
+        "KB ingest: walking Drive, extracting, chunking, then embedding "
+        "(embedding logs progress per batch; may take several minutes)…",
+        err=True,
+    )
     result = ingest.run()
     click.echo(
         f"KB ingest complete: rag_sources={result.rag_source_count}, "

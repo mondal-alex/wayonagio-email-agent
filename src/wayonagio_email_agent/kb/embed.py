@@ -32,6 +32,9 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 litellm.suppress_debug_info = True
+# LiteLLM otherwise logs "Wrapper: Completed Call…" at INFO for every
+# batch during kb-ingest, which drowns out our own progress lines.
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
@@ -124,20 +127,39 @@ def embed_texts(
     vectors: list[list[float]] = []
     max_retries = _max_rate_limit_retries()
     batch_count = (len(texts) + resolved_batch_size - 1) // resolved_batch_size
+    # Log an update every N batches on huge ingests so the terminal does not
+    # scroll thousands of lines (e.g. Tier-1+ with large batch sizes).
+    progress_every = (
+        1
+        if batch_count <= 80
+        else max(1, batch_count // 40)  # ~40 progress lines max
+    )
 
-    if batch_count > 1:
-        logger.info(
-            "Embedding %d chunk(s) in %d batch(es) of %d (model=%s, "
-            "inter-batch pacing %.1fs).",
-            len(texts), batch_count, resolved_batch_size, model,
-            inter_batch_sleep,
-        )
+    logger.info(
+        "Embedding %d chunk(s) in %d batch(es) of up to %d (model=%s, "
+        "inter-batch pacing %.1fs).",
+        len(texts), batch_count, resolved_batch_size, model, inter_batch_sleep,
+    )
 
     for index, start in enumerate(
         range(0, len(texts), resolved_batch_size), start=1
     ):
         if index > 1 and inter_batch_sleep > 0:
             time.sleep(inter_batch_sleep)
+        if (
+            index == 1
+            or index == batch_count
+            or (index % progress_every == 0)
+        ):
+            end_idx = start + min(resolved_batch_size, len(texts) - start)
+            logger.info(
+                "  embedding batch %d/%d (chunks %d–%d of %d)…",
+                index,
+                batch_count,
+                start + 1,
+                end_idx,
+                len(texts),
+            )
         batch = texts[start : start + resolved_batch_size]
         response = _embed_batch_with_retry(
             batch,

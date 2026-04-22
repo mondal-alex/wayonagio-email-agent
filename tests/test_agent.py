@@ -114,6 +114,29 @@ class TestManualDraftFlow:
             latest_customer_turn=_FAKE_PARTS["body"],
         )
 
+    def test_transcript_anchor_uses_api_message_id(self, monkeypatch):
+        """Add-on may pass client-style id; threads.get uses get_message() id form."""
+        captured: dict = {}
+
+        def capture_build_thread(**kwargs: object) -> str:
+            captured.update(kwargs)
+            return "THREAD CONTEXT"
+
+        monkeypatch.setattr(
+            agent.gmail_client, "build_thread_transcript", capture_build_thread
+        )
+        add_on_id = "msg-f:1863203143936991207"
+        api_message = {**_FAKE_MESSAGE, "id": "1863203143936991207"}
+        with (
+            patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=api_message),
+            patch("wayonagio_email_agent.agent.gmail_client.extract_message_parts", return_value=_FAKE_PARTS),
+            patch("wayonagio_email_agent.agent.llm.detect_language", return_value="it"),
+            patch("wayonagio_email_agent.agent.llm.generate_reply", return_value="Risposta"),
+            patch("wayonagio_email_agent.agent.gmail_client.draft_reply", return_value={"id": "x"}),
+        ):
+            manual_draft_flow(add_on_id)
+        assert captured.get("anchor_message_id") == "1863203143936991207"
+
 
 # ---------------------------------------------------------------------------
 # _process_message (scanner path)

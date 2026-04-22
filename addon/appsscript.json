@@ -10,7 +10,7 @@
   ],
   "gmail": {
     "name": "Wayonagio Draft Reply",
-    "logoUrl": "https://www.gstatic.com/images/branding/product/1x/gmail_512dp.png",
+    "logoUrl": "https://wayonagio.com/images/favicon.png",
     "contextualTriggers": [
       {
         "unconditional": {},
