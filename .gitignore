@@ -37,3 +37,5 @@ kb_artifacts/
 # clasp (Apps Script CLI) project link
 .clasp.json
 addon/.clasp.json
+
+redacted.txt

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from wayonagio_email_agent.exemplars.sanitize import sanitize
+from wayonagio_email_agent.exemplars.sanitize import (
+    redact_listed_phrases,
+    redact_phrase_map,
+    sanitize,
+    tidy_exemplar_export,
+)
 
 
 class TestEmail:
@@ -173,3 +178,88 @@ class TestTripwire:
 
         for marker in ("<EMAIL>", "<PHONE>", "<BOOKING_URL>", "<IBAN>", "<CARD>"):
             assert marker in cleaned, f"missing {marker} marker"
+
+
+class TestTidyExemplarExport:
+    def test_crlf_nbsp_zero_width(self):
+        raw = "A\u00a0B\r\n\r\n\r\nC\u200b"
+        out = tidy_exemplar_export(raw, elide_print_titles=False, mark_messages=False)
+        assert "\r" not in out
+        assert "\u00a0" not in out
+        assert "\u200b" not in out
+        assert "A B" in out
+        assert out.endswith("\n")
+
+    def test_collapses_excess_blank_lines(self):
+        t = "one\n\n\n\ntwo\n"
+        out = tidy_exemplar_export(t, elide_print_titles=False, mark_messages=False)
+        assert out == "one\n\ntwo\n"
+
+    def test_gmail_print_correo_lines_elided(self):
+        t = (
+            "Correo de Thread - x 4/20/26, 8:23 PM \n"
+            "x\n"
+            "Correo de Thread - x 4/20/26, 8:23 PM \n"
+            "y"
+        )
+        out = tidy_exemplar_export(t, elide_print_titles=True, mark_messages=False)
+        assert t.count("Correo de") == 2
+        assert "Correo de" not in out
+        assert "duplicate" in out
+
+    def test_spanish_gmail_headers_get_banners(self):
+        h1 = "Elena Fabbri <a@a.com> 23 de marzo de 2026 a las 2:58 p.m. Para: w"
+        h2 = "Giomara <b@b.com> 25 de marzo de 2026 a las 9:00 a.m. Para: w"
+        t = f"intro\n{h1}\nHola\n{h2}\nCiao"
+        out = tidy_exemplar_export(t, elide_print_titles=False, mark_messages=True)
+        assert "Message 2" in out
+        assert 76 * "-" in out
+
+    def test_from_line_split_across_two_lines_still_gets_banner(self):
+        # GDoc often breaks a long *From* bar after the mail token
+        h1a = "Elena Fabbri <a@a.com>"
+        h1b = "23 de marzo de 2026 a las 2:58 p.m. Para: w"
+        h2 = "Giom <b@b.com> 25 de marzo de 2026 a las 9:00 a.m. Para: w"
+        t = f"{h1a}\n{h1b}\nbody\n{h2}\nmore"
+        out = tidy_exemplar_export(t, elide_print_titles=False, mark_messages=True)
+        assert "Message 2" in out
+
+
+class TestRedactPhraseMap:
+    def test_distinct_replacements(self):
+        t = "Hi Alice Smith and just Bob."
+        out = redact_phrase_map(
+            t,
+            [
+                ("Alice Smith", "Dana Kepler"),
+                ("Bob", "Pat Lee"),
+            ],
+        )
+        assert "Dana Kepler" in out
+        assert "Pat Lee" in out
+        assert "Alice" not in out
+        assert "Bob" not in out
+
+
+class TestRedactListedPhrases:
+    def test_longer_phrase_wins(self):
+        t = "Ciao Marco Bianchi, not solo Marco."
+        out = redact_listed_phrases(t, ["Marco Bianchi", "Marco"])
+        assert "Bianchi" not in out
+        assert out.count("<NAME>") == 2
+
+    def test_case_insensitive(self):
+        t = "MARCO and marco and Marco"
+        out = redact_listed_phrases(t, ["Marco"])
+        assert "marco" not in out.lower()
+        assert out.count("<NAME>") == 3
+
+
+class TestSanitizeThenNames:
+    def test_order_email_then_name_phrase(self):
+        raw = "Write to a@b.com, ciao Maria Rossi."
+        step1 = sanitize(raw)
+        step2 = redact_listed_phrases(step1, ["Maria Rossi"])
+        assert "@" not in step2
+        assert "Maria" not in step2
+        assert "Rossi" not in step2
