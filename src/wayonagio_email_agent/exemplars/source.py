@@ -16,11 +16,10 @@ Performance contract — see ``exemplars/__init__.py`` and
   and ``files().list`` is a single round-trip per page; parallelizing
   listing rarely buys anything and complicates pagination.
 * Per-Doc *reads* are parallelized through a
-  ``ThreadPoolExecutor(max_workers=8)``. The Google Drive client is
-  thread-safe for independent ``files().get_media`` / ``files().export``
-  calls (each one builds its own HTTP request), and the latency dominates:
-  for 30 Docs at ~200ms each, the wall-clock drops from ~6s sequential to
-  ~1s under the 8-way pool. The pool size is small enough to stay under
+  ``ThreadPoolExecutor(max_workers=8)``. Each worker creates its own Drive
+  client instead of sharing one client across threads — this is a little more
+  auth overhead, but avoids thread-safety issues seen in some environments and
+  keeps startup stable. The pool size is still small enough to stay under
   Drive's per-user quota even when warm-up coincides with the first user
   request.
 """
@@ -101,8 +100,9 @@ def collect(
     # Doc still uses the threadpool path (and we exercise the same code in
     # tests as in production).
     with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+        per_doc_service = service if service is not None else None
         futures = {
-            pool.submit(_load_one, df, svc): df for df in drive_files
+            pool.submit(_load_one, df, per_doc_service): df for df in drive_files
         }
         for future in as_completed(futures):
             df = futures[future]
@@ -127,7 +127,8 @@ def collect(
 
 
 def _load_one(
-    drive_file: kb_drive.DriveFile, service: Any
+    drive_file: kb_drive.DriveFile,
+    service: Any | None = None,
 ) -> Exemplar | None:
     """Fetch, extract, and sanitize one Drive file. Returns ``None`` for
     files that are empty after extraction so the caller can drop them."""

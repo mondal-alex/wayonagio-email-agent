@@ -81,7 +81,18 @@ def load_credentials() -> Credentials:
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            _save_credentials(creds)
+            try:
+                _save_credentials(creds)
+            except OSError as exc:
+                # Cloud Run Secret Manager file mounts are read-only. Refreshing
+                # in memory is sufficient for the current process; persisting is
+                # best-effort only in those environments.
+                logger.warning(
+                    "OAuth token refreshed but could not be persisted to '%s' "
+                    "(read-only mount or permissions issue): %s",
+                    token_path,
+                    exc,
+                )
             logger.debug("OAuth token refreshed successfully.")
             return creds
         except RefreshError as exc:

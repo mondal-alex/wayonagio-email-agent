@@ -6,10 +6,14 @@
   "oauthScopes": [
     "https://www.googleapis.com/auth/gmail.addons.execute",
     "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/script.external_request"
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
+  "urlFetchWhitelist": [
+    "https://*.a.run.app/"
   ],
   "gmail": {
-    "name": "Wayonagio Draft Reply",
+    "name": "Wayonagio Borradores",
     "logoUrl": "https://wayonagio.com/images/favicon.png",
     "contextualTriggers": [
       {
@@ -17,6 +21,8 @@
         "onTriggerFunction": "buildAddOn"
       }
     ],
-    "openLinkUrlPrefixes": []
+    "openLinkUrlPrefixes": [
+      "https://mail.google.com/"
+    ]
   }
 }

@@ -9,7 +9,9 @@
  *   2. Go to Project Settings → Script Properties and add:
  *        BACKEND_URL   — e.g. https://your-server.example.com
  *        BEARER_TOKEN  — same value as AUTH_BEARER_TOKEN in your .env
- *   3. Deploy as a Google Workspace Add-on and install for your domain.
+ *   3. In appsscript.json, set urlFetchWhitelist to include your BACKEND_URL host
+ *        (e.g. https://*.a.run.app/ for Cloud Run). Required for UrlFetchApp.
+ *   4. Deploy as a Google Workspace Add-on and install for your domain.
  */
 
 /**
@@ -32,7 +34,7 @@ function buildAddOn(e) {
  */
 function buildDraftButtonsCard(messageId, threadId) {
   var italianButton = CardService.newTextButton()
-    .setText("🇮🇹 Draft in Italian")
+    .setText("🇮🇹 Borrador en italiano")
     .setOnClickAction(
       CardService.newAction()
         .setFunctionName("onDraftReply")
@@ -44,7 +46,7 @@ function buildDraftButtonsCard(messageId, threadId) {
     );
 
   var spanishButton = CardService.newTextButton()
-    .setText("🇵🇪 Draft in Spanish")
+    .setText("🇵🇪 Borrador en espanol")
     .setOnClickAction(
       CardService.newAction()
         .setFunctionName("onDraftReply")
@@ -61,7 +63,7 @@ function buildDraftButtonsCard(messageId, threadId) {
     .addWidget(spanishButton);
 
   return CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle("Draft reply"))
+    .setHeader(CardService.newCardHeader().setTitle("Borrador de respuesta"))
     .addSection(section)
     .build();
 }
@@ -76,12 +78,16 @@ function buildDraftButtonsCard(messageId, threadId) {
  * @returns {Card}
  */
 function buildSuccessCard(draftId, threadId, messageId) {
+  var accountEmail = Session.getActiveUser().getEmail();
+  var baseUrl = accountEmail
+    ? "https://mail.google.com/mail/u/" + encodeURIComponent(accountEmail)
+    : "https://mail.google.com/mail";
   var threadUrl = threadId
-    ? "https://mail.google.com/mail/#all/" + encodeURIComponent(threadId)
-    : "https://mail.google.com/mail/#drafts";
+    ? baseUrl + "/#all/" + encodeURIComponent(threadId)
+    : baseUrl + "/#drafts";
 
   var openThreadButton = CardService.newTextButton()
-    .setText("Open thread in new tab")
+    .setText("Abrir hilo en una pestana nueva")
     .setOpenLink(
       CardService.newOpenLink()
         .setUrl(threadUrl)
@@ -90,7 +96,7 @@ function buildSuccessCard(draftId, threadId, messageId) {
     );
 
   var backButton = CardService.newTextButton()
-    .setText("Back to draft buttons")
+    .setText("Volver a los botones")
     .setOnClickAction(
       CardService.newAction()
         .setFunctionName("onBackToButtons")
@@ -98,17 +104,17 @@ function buildSuccessCard(draftId, threadId, messageId) {
     );
 
   var section = CardService.newCardSection()
-    .setHeader("Draft created")
+    .setHeader("Borrador creado")
     .addWidget(
       CardService.newTextParagraph().setText(
-        "Your draft is ready in this thread. Click below to jump to it."
+        "Tu borrador esta listo en este hilo. Haz clic abajo para abrirlo."
       )
     )
     .addWidget(openThreadButton)
     .addWidget(backButton)
     .addWidget(
       CardService.newTextParagraph().setText(
-        "<font color=\"#888888\">Draft ID: " + draftId + "</font>"
+        "<font color=\"#888888\">ID de borrador: " + draftId + "</font>"
       )
     );
 
@@ -130,14 +136,14 @@ function onDraftReply(e) {
   var threadId = e.parameters.threadId;
   var language = e.parameters.language;
   var props = PropertiesService.getScriptProperties();
-  var backendUrl = props.getProperty("BACKEND_URL");
-  var bearerToken = props.getProperty("BEARER_TOKEN");
+  var backendUrl = (props.getProperty("BACKEND_URL") || "").trim();
+  var bearerToken = (props.getProperty("BEARER_TOKEN") || "").trim();
 
   if (!backendUrl || !bearerToken) {
     return CardService.newActionResponseBuilder()
       .setNotification(
         CardService.newNotification().setText(
-          "Add-on not configured. Set BACKEND_URL and BEARER_TOKEN in Script Properties."
+          "Complemento no configurado. Define BACKEND_URL y BEARER_TOKEN en Propiedades del script."
         )
       )
       .build();
@@ -163,7 +169,7 @@ function onDraftReply(e) {
 
       return CardService.newActionResponseBuilder()
         .setNotification(
-          CardService.newNotification().setText("Draft created")
+          CardService.newNotification().setText("Borrador creado")
         )
         .setNavigation(CardService.newNavigation().updateCard(successCard))
         .build();
@@ -181,7 +187,7 @@ function onDraftReply(e) {
     Logger.log("Request failed: " + err);
     return CardService.newActionResponseBuilder()
       .setNotification(
-        CardService.newNotification().setText("Request failed: " + err)
+        CardService.newNotification().setText("La solicitud fallo: " + err)
       )
       .build();
   }

@@ -154,7 +154,9 @@ def _verify_token(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Server authentication is not configured.",
         )
-    if not hmac.compare_digest(credentials.credentials, expected):
+    got = credentials.credentials.strip()
+    want = expected.strip()
+    if not hmac.compare_digest(got, want):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid bearer token.",
