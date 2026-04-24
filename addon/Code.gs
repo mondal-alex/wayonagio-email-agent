@@ -78,10 +78,7 @@ function buildDraftButtonsCard(messageId, threadId) {
  * @returns {Card}
  */
 function buildSuccessCard(draftId, threadId, messageId) {
-  var accountEmail = Session.getActiveUser().getEmail();
-  var baseUrl = accountEmail
-    ? "https://mail.google.com/mail/u/" + encodeURIComponent(accountEmail)
-    : "https://mail.google.com/mail";
+  var baseUrl = "https://mail.google.com/mail";
   var threadUrl = threadId
     ? baseUrl + "/#all/" + encodeURIComponent(threadId)
     : baseUrl + "/#drafts";

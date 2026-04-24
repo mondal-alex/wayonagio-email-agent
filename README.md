@@ -726,6 +726,30 @@ If `kb-doctor` says `UNHEALTHY`, fix what it reports before wiring the Add-on to
 - **Rotate Gemini key**: `gcloud secrets versions add gemini-api-key --data-file=-`, then redeploy/update the service so it picks up the new version.
 - **Refresh Gmail token** (if the OAuth refresh token is ever revoked): `uv run python -m wayonagio_email_agent.cli auth` locally, then `gcloud secrets versions add gmail-token --data-file=token.json`, then update the service.
 
+#### OAuth/token health check
+
+After rotating `gmail-token` (or anytime draft creation fails unexpectedly), run
+this quick check to confirm the active revision and recent auth behavior:
+
+```bash
+gcloud run services describe wayonagio-email-agent \
+  --project="$PROJECT_ID" \
+  --region=us-central1 \
+  --format='yaml(status.latestReadyRevisionName,spec.template.spec.containers[0].env,status.url)'
+
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="wayonagio-email-agent" AND (textPayload:"OAuth token refresh failed" OR textPayload:"invalid_grant" OR textPayload:"Authentication successful" OR textPayload:"POST /draft-reply")' \
+  --project="$PROJECT_ID" \
+  --limit=50 \
+  --order=desc \
+  --format='table(timestamp,severity,textPayload)'
+```
+
+Healthy signals:
+- `GMAIL_TOKEN_PATH` points to `/secrets/gmail-token/token.json`.
+- You see recent `POST /draft-reply` lines.
+- You do **not** see fresh `invalid_grant` / `OAuth token refresh failed` after your latest deploy.
+
 ### Optional automation scripts
 
 If you prefer one-command workflows instead of running each `gcloud` step manually,
@@ -754,6 +778,10 @@ RAG_FOLDER_IDS="drive-folder-id-1,drive-folder-id-2" \
 EXEMPLAR_FOLDER_IDS="optional-exemplar-folder-id-1,optional-exemplar-folder-id-2" \
 scripts/cloud/update.sh
 
+# 2b) OAuth/token health check (active revision + auth log scan)
+PROJECT_ID="your-project-id" \
+scripts/cloud/oauth_health_check.sh
+
 # Optional on update: refresh secrets and run KB ingest immediately
 PROJECT_ID="your-project-id" \
 RAG_FOLDER_IDS="drive-folder-id-1,drive-folder-id-2" \
@@ -777,7 +805,7 @@ scripts/cloud/teardown.sh
 
 Use `--help` on each script for all environment variables and defaults:
 `scripts/cloud/deploy_from_scratch.sh --help`, `scripts/cloud/update.sh --help`,
-`scripts/cloud/teardown.sh --help`.
+`scripts/cloud/teardown.sh --help`, `scripts/cloud/oauth_health_check.sh --help`.
 
 ## Server deployment
 
