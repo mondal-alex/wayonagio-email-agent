@@ -70,6 +70,7 @@ cp .env.example .env
 | `OLLAMA_MODEL`           | Ollama only (legacy) | Back-compat: if `LLM_MODEL` is unset, we use `ollama/<OLLAMA_MODEL>`.                                                                                          |
 | `OLLAMA_KEEP_ALIVE`      | Ollama only          | How long Ollama keeps the model loaded (e.g. `5m`, `1h`, `-1`). Default `1h`.                                                                                  |
 | `AUTH_BEARER_TOKEN`      | always               | Bearer token for API authentication                                                                                                                            |
+| `STAFF_EMAIL_DOMAINS`    | always               | Comma-separated domains considered staff senders for manual add-on drafts. Default: `wayonagio.com`                                                            |
 | `SCANNER_ENABLED`        | always               | Feature flag for automatic scanner (`false` by default)                                                                                                        |
 | `SCANNER_STATE_DB`       | always               | SQLite DB path for scanner dedup state (default: `scanner_state.db`)                                                                                           |
 | `LOG_LEVEL`              | always               | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` (default: `INFO`)                                                                                           |
@@ -161,7 +162,7 @@ This service is simple by design. The security posture below is what keeps it tr
 
 **Logging and PII**
 
-- **Do not run with `LOG_LEVEL=DEBUG` in production.** DEBUG logs include LLM classifier outputs and message-ID/sender metadata. INFO (the default) logs only the message ID and language for each request.
+- **Do not run with `LOG_LEVEL=DEBUG` in production.** DEBUG logs include LLM classifier outputs and message-ID/sender metadata. INFO (the default) logs only the message ID, thread ID, resolved anchor ID, and language for each request.
 - Set an explicit retention policy on your Cloud Logging `_Default` bucket. The platform default is 30 days; set it shorter if your privacy policy requires it:
   ```bash
   gcloud logging buckets update _Default --location=global --retention-days=14
@@ -206,6 +207,13 @@ uv run uvicorn wayonagio_email_agent.api:app --host 0.0.0.0
 ```
 
 Must be run behind a reverse proxy (Caddy or Nginx) that terminates HTTPS. See [Server deployment](#server-deployment).
+
+Manual add-on drafts are deterministic at the thread level: the backend uses
+the add-on's `thread_id` to load the Gmail thread, ignores drafts, and replies
+to the newest non-draft message only if it is from a customer. Sender domains in
+`STAFF_EMAIL_DOMAINS` (default `wayonagio.com`) are treated as staff; if the
+newest message is from staff, the API returns a Spanish explanation and no draft
+is created.
 
 ### Automatic scanner
 
@@ -552,7 +560,7 @@ gcloud run deploy wayonagio-email-agent \
   --min-instances=0 \
   --max-instances=2 \
   --cpu=1 --memory=512Mi \
-  --set-env-vars="^@^LLM_MODEL=gemini/gemini-2.5-flash@GMAIL_CREDENTIALS_PATH=/secrets/gmail-credentials/credentials.json@GMAIL_TOKEN_PATH=/secrets/gmail-token/token.json@SCANNER_ENABLED=false@LOG_LEVEL=INFO@KB_GCS_URI=gs://wayonagio-kb@KB_EMBEDDING_MODEL=gemini/gemini-embedding-001@KB_RAG_FOLDER_IDS=<rag-folder-ids>@KB_EXEMPLAR_FOLDER_IDS=<exemplar-folder-ids-optional>" \
+  --set-env-vars="^@^LLM_MODEL=gemini/gemini-2.5-flash@GMAIL_CREDENTIALS_PATH=/secrets/gmail-credentials/credentials.json@GMAIL_TOKEN_PATH=/secrets/gmail-token/token.json@SCANNER_ENABLED=false@STAFF_EMAIL_DOMAINS=wayonagio.com@LOG_LEVEL=INFO@KB_GCS_URI=gs://wayonagio-kb@KB_EMBEDDING_MODEL=gemini/gemini-embedding-001@KB_RAG_FOLDER_IDS=<rag-folder-ids>@KB_EXEMPLAR_FOLDER_IDS=<exemplar-folder-ids-optional>" \
   --set-secrets=AUTH_BEARER_TOKEN=auth-bearer-token:latest,GEMINI_API_KEY=gemini-api-key:latest \
   --set-secrets=/secrets/gmail-credentials/credentials.json=gmail-credentials:latest,/secrets/gmail-token/token.json=gmail-token:latest
 ```

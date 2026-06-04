@@ -184,11 +184,17 @@ Pick a `message_id`, then create a draft reply:
 uv run python -m wayonagio_email_agent.cli draft-reply <message_id>
 ```
 
+Manual drafting is thread-based: the CLI uses the message ID to find the Gmail
+thread, then drafts against the newest non-draft customer message in that
+thread. If the newest message is from a configured staff domain
+(`STAFF_EMAIL_DOMAINS`, default `wayonagio.com`), no draft is created because
+the thread is already answered.
+
 Open Gmail and confirm:
 
 - a draft was created,
 - it appears in the correct thread,
-- the reply reflects the whole thread context (first contact through the target message), not just the latest line,
+- the reply reflects the whole thread context (first contact through the newest customer message), not just the latest line,
 - it was not sent automatically.
 
 ## 6. Test the local API directly
@@ -205,7 +211,7 @@ Then call it with `curl`:
 curl -X POST http://127.0.0.1:8000/draft-reply \
   -H "Authorization: Bearer <AUTH_BEARER_TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"message_id":"<message_id>","language":"it"}'
+  -d '{"message_id":"<message_id>","thread_id":"<thread_id>","language":"it"}'
 ```
 
 If the response includes a draft ID and a draft appears in Gmail, the API path is working.

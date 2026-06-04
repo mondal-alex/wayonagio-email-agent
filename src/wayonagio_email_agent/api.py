@@ -2,7 +2,8 @@
 
 Endpoints:
   GET  /healthz       — unauthenticated liveness probe for Cloud Run / monitors
-  POST /draft-reply   { "message_id": "...", "language": "it|es|en" (optional) }
+  POST /draft-reply   { "message_id": "...", "thread_id": "..." (optional),
+                        "language": "it|es|en" (optional) }
       Requires Authorization: Bearer <AUTH_BEARER_TOKEN>
       Calls the manual draft flow and returns the created draft ID.
 
@@ -185,6 +186,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
 # ---------------------------------------------------------------------------
 class DraftReplyRequest(BaseModel):
     message_id: str
+    thread_id: str | None = None
     language: Literal["it", "es", "en"] | None = None
 
 
@@ -227,13 +229,33 @@ def draft_reply(body: DraftReplyRequest) -> DraftReplyResponse:
     this ``async`` would block every other request (including ``/healthz``)
     for the entire duration of one draft.
     """
-    logger.info("POST /draft-reply message_id=%s language=%s", body.message_id, body.language)
+    logger.info(
+        "POST /draft-reply message_id=%s thread_id=%s language=%s",
+        body.message_id,
+        body.thread_id,
+        body.language,
+    )
     try:
-        draft = agent.manual_draft_flow(body.message_id, forced_language=body.language)
+        draft = agent.manual_draft_flow(
+            body.message_id,
+            forced_language=body.language,
+            thread_id=body.thread_id,
+        )
     except SystemExit:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Gmail authentication failed. Run `cli auth` on the server.",
+        )
+    except agent.NoCustomerReplyNeededError as exc:
+        logger.info(
+            "Draft skipped for %s/%s: %s",
+            body.thread_id,
+            body.message_id,
+            exc.detail,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.detail,
         )
     except (KBUnavailableError, KBConfigError) as exc:
         # The KB is a hard dependency: every draft must be grounded in agency

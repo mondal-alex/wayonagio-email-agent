@@ -285,6 +285,21 @@ class TestDraftReplyCommand:
         assert "empty reply" in result.output.lower()
         assert "Traceback" not in result.output
 
+    def test_already_answered_thread_surfaces_clean_error(self):
+        runner = CliRunner()
+
+        from wayonagio_email_agent.agent import NoCustomerReplyNeededError
+
+        with patch(
+            "wayonagio_email_agent.agent.manual_draft_flow",
+            side_effect=NoCustomerReplyNeededError(),
+        ):
+            result = runner.invoke(cli, ["draft-reply", "msg-1"])
+
+        assert result.exit_code != 0
+        assert "No se creo ningun borrador" in result.output
+        assert "Traceback" not in result.output
+
 
 class TestKBSearchCommand:
     def test_prints_results_when_hits_exist(self):

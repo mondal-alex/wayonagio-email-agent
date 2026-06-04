@@ -70,6 +70,7 @@ set_defaults() {
   : "${KB_BUCKET_NAME:=wayonagio-kb}"
   : "${IMAGE_TAG:=latest}"
   : "${SCANNER_ENABLED:=false}"
+  : "${STAFF_EMAIL_DOMAINS:=wayonagio.com}"
   : "${LOG_LEVEL:=INFO}"
   : "${LLM_MODEL:=gemini/gemini-2.5-flash}"
   : "${KB_EMBEDDING_MODEL:=gemini/gemini-embedding-001}"

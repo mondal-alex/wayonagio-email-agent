@@ -122,6 +122,75 @@ function buildSuccessCard(draftId, threadId, messageId) {
 }
 
 /**
+ * Builds a persistent error card so backend errors remain visible after the
+ * notification toast disappears.
+ * @param {string} message
+ * @param {number} code
+ * @param {string} messageId
+ * @param {string} threadId
+ * @returns {Card}
+ */
+function buildErrorCard(message, code, messageId, threadId) {
+  var backButton = CardService.newTextButton()
+    .setText("Volver a los botones")
+    .setOnClickAction(
+      CardService.newAction()
+        .setFunctionName("onBackToButtons")
+        .setParameters({ messageId: messageId, threadId: threadId })
+    );
+
+  var section = CardService.newCardSection()
+    .setHeader("No se creo el borrador")
+    .addWidget(
+      CardService.newTextParagraph().setText(
+        escapeHtml(message || "No se pudo crear el borrador.")
+      )
+    )
+    .addWidget(
+      CardService.newTextParagraph().setText(
+        "<font color=\"#888888\">Codigo: " + code + "</font>"
+      )
+    )
+    .addWidget(backButton);
+
+  return CardService.newCardBuilder()
+    .setHeader(CardService.newCardHeader().setTitle("Wayonagio"))
+    .addSection(section)
+    .build();
+}
+
+/**
+ * Extract a user-facing error message from a backend response body.
+ * @param {string} text
+ * @returns {string}
+ */
+function parseErrorMessage(text) {
+  try {
+    var body = JSON.parse(text);
+    if (body && body.detail) {
+      return String(body.detail);
+    }
+  } catch (err) {
+    // Fall through to raw body below.
+  }
+  return text || "No se pudo crear el borrador.";
+}
+
+/**
+ * Escape user-visible text before rendering in a TextParagraph.
+ * @param {string} text
+ * @returns {string}
+ */
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
  * Called when the user clicks a "Draft in <language>" button.
  * POSTs to the backend, then swaps the card for a success card with a button
  * that opens the Gmail thread.
@@ -129,8 +198,8 @@ function buildSuccessCard(draftId, threadId, messageId) {
  * @returns {ActionResponse}
  */
 function onDraftReply(e) {
-  var messageId = e.parameters.messageId;
-  var threadId = e.parameters.threadId;
+  var messageId = (e.gmail && e.gmail.messageId) || e.parameters.messageId;
+  var threadId = (e.gmail && e.gmail.threadId) || e.parameters.threadId;
   var language = e.parameters.language;
   var props = PropertiesService.getScriptProperties();
   var backendUrl = (props.getProperty("BACKEND_URL") || "").trim();
@@ -152,7 +221,11 @@ function onDraftReply(e) {
     method: "post",
     contentType: "application/json",
     headers: { Authorization: "Bearer " + bearerToken },
-    payload: JSON.stringify({ message_id: messageId, language: language }),
+    payload: JSON.stringify({
+      message_id: messageId,
+      thread_id: threadId,
+      language: language,
+    }),
     muteHttpExceptions: true,
   };
 
@@ -171,13 +244,14 @@ function onDraftReply(e) {
         .setNavigation(CardService.newNavigation().updateCard(successCard))
         .build();
     } else {
-      Logger.log("Backend error " + code + ": " + response.getContentText());
+      var errorText = parseErrorMessage(response.getContentText());
+      var errorCard = buildErrorCard(errorText, code, messageId, threadId);
+      Logger.log("Backend error " + code + ": " + errorText);
       return CardService.newActionResponseBuilder()
         .setNotification(
-          CardService.newNotification().setText(
-            "Error " + code + ": " + response.getContentText()
-          )
+          CardService.newNotification().setText(errorText)
         )
+        .setNavigation(CardService.newNavigation().updateCard(errorCard))
         .build();
     }
   } catch (err) {

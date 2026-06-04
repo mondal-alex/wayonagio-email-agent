@@ -228,6 +228,100 @@ class TestThreadTranscript:
             msg["internalDate"] = internal_date
         return msg
 
+    def test_latest_anchor_uses_newest_customer_message(self):
+        thread = {
+            "messages": [
+                self._thread_message(
+                    mid="m1",
+                    internal_date="1000",
+                    sender="info@wayonagio.com",
+                    subject="Reply",
+                    body="Staff reply",
+                ),
+                self._thread_message(
+                    mid="m2",
+                    internal_date="2000",
+                    sender="Guest Name <guest@example.com>",
+                    subject="Question",
+                    body="Customer follow-up",
+                ),
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            anchor, returned_thread = gmail_client.resolve_latest_thread_anchor("t-1")
+
+        assert returned_thread is thread
+        assert anchor.message["id"] == "m2"
+        assert anchor.parts["from_"] == "Guest Name <guest@example.com>"
+        assert anchor.is_staff is False
+
+    def test_latest_anchor_marks_configured_staff_domain_case_insensitively(self, monkeypatch):
+        monkeypatch.setenv("STAFF_EMAIL_DOMAINS", "wayonagio.com,example.org")
+        thread = {
+            "messages": [
+                self._thread_message(
+                    mid="m1",
+                    internal_date="1000",
+                    sender="guest@example.net",
+                    subject="Question",
+                    body="Customer question",
+                ),
+                self._thread_message(
+                    mid="m2",
+                    internal_date="2000",
+                    sender="Wayonagio <INFO@WAYONAGIO.COM>",
+                    subject="Reply",
+                    body="Staff reply",
+                ),
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            anchor, _ = gmail_client.resolve_latest_thread_anchor("t-1")
+
+        assert anchor.message["id"] == "m2"
+        assert anchor.is_staff is True
+
+    def test_latest_anchor_ignores_drafts(self):
+        thread = {
+            "messages": [
+                self._thread_message(
+                    mid="m1",
+                    internal_date="1000",
+                    sender="guest@example.com",
+                    subject="Question",
+                    body="Customer question",
+                ),
+                self._thread_message(
+                    mid="draft",
+                    internal_date="2000",
+                    sender="info@wayonagio.com",
+                    subject="Draft",
+                    body="Draft body",
+                    label_ids=["DRAFT"],
+                ),
+            ]
+        }
+        service = Mock()
+        service.users.return_value.threads.return_value.get.return_value.execute.return_value = (
+            thread
+        )
+
+        with patch("wayonagio_email_agent.gmail_client._build_service", return_value=service):
+            anchor, _ = gmail_client.resolve_latest_thread_anchor("t-1")
+
+        assert anchor.message["id"] == "m1"
+        assert anchor.is_staff is False
+
     def test_includes_messages_up_to_anchor_excluding_drafts(self):
         thread = {
             "messages": [

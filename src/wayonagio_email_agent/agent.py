@@ -32,6 +32,19 @@ from wayonagio_email_agent.llm import client as llm
 logger = logging.getLogger(__name__)
 _DEFAULT_THREAD_MAX_CHARS = 48_000
 _MIN_THREAD_MAX_CHARS = 1_000
+_NO_CUSTOMER_REPLY_NEEDED_DETAIL = (
+    "Este hilo ya tiene una respuesta del equipo de Wayonagio como ultimo "
+    "mensaje. No se creo ningun borrador porque no hay un mensaje nuevo del "
+    "cliente pendiente de responder."
+)
+
+
+class NoCustomerReplyNeededError(RuntimeError):
+    """Raised when the latest thread message is from staff, not a customer."""
+
+    def __init__(self, detail: str = _NO_CUSTOMER_REPLY_NEEDED_DETAIL) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 def scanner_enabled() -> bool:
@@ -64,25 +77,58 @@ def _thread_max_chars() -> int:
     return value
 
 
-def manual_draft_flow(message_id: str, forced_language: str | None = None) -> dict:
+def manual_draft_flow(
+    message_id: str,
+    forced_language: str | None = None,
+    thread_id: str | None = None,
+) -> dict:
     """Create a draft reply for *message_id*.
 
     Used by both the API (Add-on trigger) and the CLI `draft-reply` command.
-    No travel classification — caller has already chosen the email.
+    No travel classification — caller has already chosen the Gmail thread.
 
     Returns the Gmail draft resource dict.
     """
-    logger.info("Starting manual draft flow for message %s.", message_id)
+    logger.info(
+        "Starting manual draft flow for requested message %s (thread_id=%s).",
+        message_id,
+        thread_id,
+    )
 
-    message = gmail_client.get_message(message_id)
-    parts = gmail_client.extract_message_parts(message)
-    # Gmail add-ons may pass a client-style id (e.g. msg-f:...); thread payloads
-    # use the API's canonical id, so anchor transcript lookup on message["id"].
-    anchor_id = message["id"]
-    transcript = gmail_client.build_thread_transcript(
-        thread_id=parts["thread_id"],
+    resolved_thread_id = thread_id
+    if not resolved_thread_id:
+        # Backward compatibility for CLI and older Add-on deployments that only
+        # send message_id. New Add-on requests send thread_id directly.
+        message = gmail_client.get_message(message_id)
+        resolved_thread_id = message.get("threadId", "")
+        if not resolved_thread_id:
+            parts = gmail_client.extract_message_parts(message)
+            resolved_thread_id = parts["thread_id"]
+
+    anchor, thread = gmail_client.resolve_latest_thread_anchor(resolved_thread_id)
+    if anchor.is_staff:
+        logger.info(
+            "Manual draft skipped: latest non-draft message is staff "
+            "(requested_message=%s, thread=%s, anchor=%s).",
+            message_id,
+            resolved_thread_id,
+            anchor.message.get("id"),
+        )
+        raise NoCustomerReplyNeededError()
+
+    parts = anchor.parts
+    anchor_id = anchor.message["id"]
+    transcript = gmail_client.build_thread_transcript_from_thread(
+        thread=thread,
+        thread_id=resolved_thread_id,
         anchor_message_id=anchor_id,
         max_chars=_thread_max_chars(),
+    )
+    logger.info(
+        "Manual draft anchor resolved (requested_message=%s, thread=%s, anchor=%s).",
+        message_id,
+        resolved_thread_id,
+        anchor_id,
     )
 
     body_text = transcript
@@ -101,14 +147,18 @@ def manual_draft_flow(message_id: str, forced_language: str | None = None) -> di
     )
 
     draft = gmail_client.draft_reply(
-        thread_id=parts["thread_id"],
+        thread_id=resolved_thread_id,
         to=parts["from_"],
         subject=parts["subject"],
         body=reply_body,
         in_reply_to=parts["message_id_header"],
         references=_build_references(parts["references"], parts["message_id_header"]),
     )
-    logger.info("Draft created successfully for message %s.", message_id)
+    logger.info(
+        "Draft created successfully for requested message %s (anchor=%s).",
+        message_id,
+        anchor_id,
+    )
     return draft
 
 

@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 os.environ["AUTH_BEARER_TOKEN"] = "test-token"
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 
+from wayonagio_email_agent import agent  # noqa: E402
 from wayonagio_email_agent.api import app  # noqa: E402
 from wayonagio_email_agent.kb.config import KBConfigError  # noqa: E402
 from wayonagio_email_agent.kb.retrieve import KBUnavailableError  # noqa: E402
@@ -145,7 +146,7 @@ class TestDraftReplyEndpoint:
         monkeypatch.delenv("KB_GCS_URI", raising=False)
         kb_retrieve.reset_cache()
 
-        fake_message = {"id": "msg-end-to-end"}
+        fake_message = {"id": "msg-end-to-end", "threadId": "thread-1"}
         fake_parts = {
             "subject": "Tour pricing",
             "from_": "guest@example.com",
@@ -159,11 +160,22 @@ class TestDraftReplyEndpoint:
         with (
             patch.object(gmail_client, "get_message", return_value=fake_message),
             patch.object(
-                gmail_client, "extract_message_parts", return_value=fake_parts
+                gmail_client,
+                "resolve_latest_thread_anchor",
+                return_value=(
+                    gmail_client.ThreadAnchor(
+                        message=fake_message,
+                        parts=fake_parts,
+                        is_staff=False,
+                        raw_message_count=1,
+                        non_draft_message_count=1,
+                    ),
+                    {"messages": [fake_message]},
+                ),
             ),
             patch.object(
                 gmail_client,
-                "build_thread_transcript",
+                "build_thread_transcript_from_thread",
                 return_value=fake_parts["body"],
             ),
             patch.object(llm_module, "detect_language", return_value="en"),
@@ -221,18 +233,42 @@ class TestDraftReplyEndpoint:
             if original is not None:
                 os.environ["AUTH_BEARER_TOKEN"] = original
 
-    def test_forced_language_is_forwarded_to_agent(self):
+    def test_forced_language_and_thread_id_are_forwarded_to_agent(self):
         with patch(
             "wayonagio_email_agent.api.agent.manual_draft_flow",
             return_value={"id": "draft-lang"},
         ) as mock_flow:
             resp = client.post(
                 "/draft-reply",
-                json={"message_id": "msg-1", "language": "it"},
+                json={
+                    "message_id": "msg-1",
+                    "thread_id": "thread-1",
+                    "language": "it",
+                },
                 headers=_GOOD_HEADERS,
             )
         assert resp.status_code == 200
-        mock_flow.assert_called_once_with("msg-1", forced_language="it")
+        mock_flow.assert_called_once_with(
+            "msg-1",
+            forced_language="it",
+            thread_id="thread-1",
+        )
+
+    def test_thread_already_answered_returns_spanish_409(self):
+        with patch(
+            "wayonagio_email_agent.api.agent.manual_draft_flow",
+            side_effect=agent.NoCustomerReplyNeededError(),
+        ):
+            resp = client.post(
+                "/draft-reply",
+                json={"message_id": "msg-1", "thread_id": "thread-1"},
+                headers=_GOOD_HEADERS,
+            )
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "Wayonagio" in detail
+        assert "No se creo ningun borrador" in detail
 
     def test_invalid_language_returns_422(self):
         resp = client.post(

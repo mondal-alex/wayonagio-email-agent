@@ -12,6 +12,7 @@ import pytest
 
 from wayonagio_email_agent import agent
 from wayonagio_email_agent.agent import (
+    NoCustomerReplyNeededError,
     _build_references,
     _process_message,
     manual_draft_flow,
@@ -42,10 +43,22 @@ _FAKE_MESSAGE = {"id": "msg-001", "threadId": "thread-001", "payload": {}}
 
 class TestManualDraftFlow:
     @pytest.fixture(autouse=True)
-    def _stub_thread_transcript(self, monkeypatch):
+    def _stub_thread_context(self, monkeypatch):
+        anchor = agent.gmail_client.ThreadAnchor(
+            message=_FAKE_MESSAGE,
+            parts=_FAKE_PARTS,
+            is_staff=False,
+            raw_message_count=1,
+            non_draft_message_count=1,
+        )
         monkeypatch.setattr(
             agent.gmail_client,
-            "build_thread_transcript",
+            "resolve_latest_thread_anchor",
+            lambda thread_id: (anchor, {"messages": [_FAKE_MESSAGE]}),
+        )
+        monkeypatch.setattr(
+            agent.gmail_client,
+            "build_thread_transcript_from_thread",
             lambda **kwargs: "THREAD CONTEXT",
         )
 
@@ -114,28 +127,108 @@ class TestManualDraftFlow:
             latest_customer_turn=_FAKE_PARTS["body"],
         )
 
-    def test_transcript_anchor_uses_api_message_id(self, monkeypatch):
-        """Add-on may pass client-style id; threads.get uses get_message() id form."""
+    def test_provided_thread_id_avoids_message_lookup(self, monkeypatch):
         captured: dict = {}
 
-        def capture_build_thread(**kwargs: object) -> str:
-            captured.update(kwargs)
-            return "THREAD CONTEXT"
+        def capture_resolve(thread_id: str):
+            captured["thread_id"] = thread_id
+            return (
+                agent.gmail_client.ThreadAnchor(
+                    message=_FAKE_MESSAGE,
+                    parts=_FAKE_PARTS,
+                    is_staff=False,
+                    raw_message_count=1,
+                    non_draft_message_count=1,
+                ),
+                {"messages": [_FAKE_MESSAGE]},
+            )
 
         monkeypatch.setattr(
-            agent.gmail_client, "build_thread_transcript", capture_build_thread
+            agent.gmail_client, "resolve_latest_thread_anchor", capture_resolve
         )
-        add_on_id = "msg-f:1863203143936991207"
-        api_message = {**_FAKE_MESSAGE, "id": "1863203143936991207"}
         with (
-            patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=api_message),
-            patch("wayonagio_email_agent.agent.gmail_client.extract_message_parts", return_value=_FAKE_PARTS),
+            patch("wayonagio_email_agent.agent.gmail_client.get_message") as mock_get,
             patch("wayonagio_email_agent.agent.llm.detect_language", return_value="it"),
             patch("wayonagio_email_agent.agent.llm.generate_reply", return_value="Risposta"),
             patch("wayonagio_email_agent.agent.gmail_client.draft_reply", return_value={"id": "x"}),
         ):
-            manual_draft_flow(add_on_id)
-        assert captured.get("anchor_message_id") == "1863203143936991207"
+            manual_draft_flow("stale-message", thread_id="thread-001")
+
+        mock_get.assert_not_called()
+        assert captured == {"thread_id": "thread-001"}
+
+    def test_stale_requested_id_resolves_to_latest_customer_anchor(self, monkeypatch):
+        latest_message = {"id": "msg-new", "threadId": "thread-001", "payload": {}}
+        latest_parts = {
+            **_FAKE_PARTS,
+            "from_": "newguest@example.com",
+            "body": "Newest customer question",
+            "message_id_header": "<msg-new@mail.example.com>",
+            "references": "<msg-old@mail.example.com>",
+        }
+        anchor = agent.gmail_client.ThreadAnchor(
+            message=latest_message,
+            parts=latest_parts,
+            is_staff=False,
+            raw_message_count=2,
+            non_draft_message_count=2,
+        )
+        monkeypatch.setattr(
+            agent.gmail_client,
+            "resolve_latest_thread_anchor",
+            lambda thread_id: (anchor, {"messages": [_FAKE_MESSAGE, latest_message]}),
+        )
+
+        with (
+            patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=_FAKE_MESSAGE),
+            patch("wayonagio_email_agent.agent.llm.detect_language", return_value="en"),
+            patch("wayonagio_email_agent.agent.llm.generate_reply", return_value="Reply") as mock_generate,
+            patch("wayonagio_email_agent.agent.gmail_client.draft_reply", return_value={"id": "x"}) as mock_draft,
+        ):
+            manual_draft_flow("msg-old")
+
+        mock_generate.assert_called_once_with(
+            thread_transcript="THREAD CONTEXT",
+            subject=latest_parts["subject"],
+            language="en",
+            latest_customer_turn="Newest customer question",
+        )
+        mock_draft.assert_called_once()
+        _, kwargs = mock_draft.call_args
+        assert kwargs["to"] == "newguest@example.com"
+        assert kwargs["in_reply_to"] == "<msg-new@mail.example.com>"
+
+    def test_newest_staff_message_raises_without_drafting(self, monkeypatch):
+        staff_message = {"id": "staff-new", "threadId": "thread-001", "payload": {}}
+        staff_parts = {
+            **_FAKE_PARTS,
+            "from_": "info@wayonagio.com",
+            "body": "Ya respondimos al cliente.",
+            "message_id_header": "<staff-new@mail.example.com>",
+        }
+        anchor = agent.gmail_client.ThreadAnchor(
+            message=staff_message,
+            parts=staff_parts,
+            is_staff=True,
+            raw_message_count=2,
+            non_draft_message_count=2,
+        )
+        monkeypatch.setattr(
+            agent.gmail_client,
+            "resolve_latest_thread_anchor",
+            lambda thread_id: (anchor, {"messages": [_FAKE_MESSAGE, staff_message]}),
+        )
+
+        with (
+            patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=_FAKE_MESSAGE),
+            patch("wayonagio_email_agent.agent.llm.generate_reply") as mock_generate,
+            patch("wayonagio_email_agent.agent.gmail_client.draft_reply") as mock_draft,
+            pytest.raises(NoCustomerReplyNeededError),
+        ):
+            manual_draft_flow("msg-old")
+
+        mock_generate.assert_not_called()
+        mock_draft.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

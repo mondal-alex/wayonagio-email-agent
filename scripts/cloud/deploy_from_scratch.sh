@@ -29,6 +29,7 @@ Optional env vars:
   CREDENTIALS_FILE            Default: ./credentials.json
   TOKEN_FILE                  Default: ./token.json
   SCANNER_ENABLED             Default: false
+  STAFF_EMAIL_DOMAINS         Default: wayonagio.com
   LOG_LEVEL                   Default: INFO
   LLM_MODEL                   Default: gemini/gemini-2.5-flash
   KB_EMBEDDING_MODEL          Default: gemini/gemini-embedding-001
@@ -67,7 +68,7 @@ BUILD_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 IMAGE_URI="us-central1-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/email-agent:${IMAGE_TAG}"
 KB_GCS_URI="gs://${KB_BUCKET_NAME}"
 CLOUDBUILD_BUCKET="gs://${PROJECT_ID}_cloudbuild"
-SERVICE_ENV_VARS="^@^LLM_MODEL=${LLM_MODEL}@GMAIL_CREDENTIALS_PATH=/secrets/gmail-credentials/credentials.json@GMAIL_TOKEN_PATH=/secrets/gmail-token/token.json@SCANNER_ENABLED=${SCANNER_ENABLED}@LOG_LEVEL=${LOG_LEVEL}@KB_GCS_URI=${KB_GCS_URI}@KB_EMBEDDING_MODEL=${KB_EMBEDDING_MODEL}@KB_TOP_K=${KB_TOP_K}@KB_RAG_FOLDER_IDS=${RAG_FOLDER_IDS}@KB_EXEMPLAR_FOLDER_IDS=${EXEMPLAR_FOLDER_IDS:-}"
+SERVICE_ENV_VARS="^@^LLM_MODEL=${LLM_MODEL}@GMAIL_CREDENTIALS_PATH=/secrets/gmail-credentials/credentials.json@GMAIL_TOKEN_PATH=/secrets/gmail-token/token.json@SCANNER_ENABLED=${SCANNER_ENABLED}@STAFF_EMAIL_DOMAINS=${STAFF_EMAIL_DOMAINS}@LOG_LEVEL=${LOG_LEVEL}@KB_GCS_URI=${KB_GCS_URI}@KB_EMBEDDING_MODEL=${KB_EMBEDDING_MODEL}@KB_TOP_K=${KB_TOP_K}@KB_RAG_FOLDER_IDS=${RAG_FOLDER_IDS}@KB_EXEMPLAR_FOLDER_IDS=${EXEMPLAR_FOLDER_IDS:-}"
 JOB_ENV_VARS="^@^LLM_MODEL=${LLM_MODEL}@KB_GCS_URI=${KB_GCS_URI}@KB_EMBEDDING_MODEL=${KB_EMBEDDING_MODEL}@KB_RAG_FOLDER_IDS=${RAG_FOLDER_IDS}@GMAIL_CREDENTIALS_PATH=/secrets/gmail-credentials/credentials.json@GMAIL_TOKEN_PATH=/secrets/gmail-token/token.json"
 
 info "Using project: ${PROJECT_ID}"

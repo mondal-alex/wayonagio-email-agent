@@ -98,6 +98,8 @@ def draft_reply(message_id: str) -> None:
     # verbatim rather than appending a second, redundant hint.
     try:
         draft = agent.manual_draft_flow(message_id)
+    except agent.NoCustomerReplyNeededError as exc:
+        raise click.ClickException(exc.detail)
     except (KBUnavailableError, KBConfigError) as exc:
         raise click.ClickException(f"Knowledge base unavailable: {exc}")
     except EmptyReplyError as exc:

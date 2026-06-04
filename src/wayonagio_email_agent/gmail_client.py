@@ -14,6 +14,8 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass
+from email.utils import parseaddr
 from email.mime.text import MIMEText
 from typing import Any
 
@@ -38,6 +40,7 @@ _BATCH_RETRY_BACKOFF_SECONDS = 2.0
 _THREAD_TRANSCRIPT_OMISSION_BANNER = (
     "[Earlier thread messages omitted — showing the most recent {count} message(s).]"
 )
+_DEFAULT_STAFF_EMAIL_DOMAINS = ("wayonagio.com",)
 
 # Note: `.env` is loaded by the entry points (api.py, cli.py). Library modules
 # intentionally don't call load_dotenv() so they stay cleanly importable in
@@ -54,6 +57,17 @@ SCOPES = [
     # walk KB_RAG_FOLDER_IDS.
     "https://www.googleapis.com/auth/drive.readonly",
 ]
+
+
+@dataclass(frozen=True)
+class ThreadAnchor:
+    """Latest non-draft thread message plus parsed metadata."""
+
+    message: dict
+    parts: dict
+    is_staff: bool
+    raw_message_count: int
+    non_draft_message_count: int
 
 
 def _credentials_path() -> str:
@@ -204,6 +218,36 @@ def get_thread_full(thread_id: str) -> dict:
         raise
 
 
+def resolve_latest_thread_anchor(thread_id: str) -> tuple[ThreadAnchor, dict]:
+    """Return the newest non-draft message in *thread_id* and the thread payload."""
+    thread = get_thread_full(thread_id)
+    raw_messages = thread.get("messages", [])
+    non_draft_messages = _non_draft_messages(raw_messages)
+    ordered = _order_thread_messages(non_draft_messages)
+
+    if not ordered:
+        raise ValueError(f"Thread {thread_id} contains no non-draft messages.")
+
+    latest = ordered[-1]
+    parts = extract_message_parts(latest)
+    anchor = ThreadAnchor(
+        message=latest,
+        parts=parts,
+        is_staff=is_staff_sender(parts["from_"]),
+        raw_message_count=len(raw_messages),
+        non_draft_message_count=len(non_draft_messages),
+    )
+    logger.info(
+        "Thread %s: latest non-draft anchor=%s staff=%s (raw=%d, non_draft=%d).",
+        thread_id,
+        latest.get("id"),
+        anchor.is_staff,
+        anchor.raw_message_count,
+        anchor.non_draft_message_count,
+    )
+    return anchor, thread
+
+
 def build_thread_transcript(
     *,
     thread_id: str,
@@ -225,12 +269,27 @@ def build_thread_transcript(
         raise ValueError(f"max_chars must be > 0, got {max_chars}.")
 
     thread = get_thread_full(thread_id)
+    return build_thread_transcript_from_thread(
+        thread=thread,
+        thread_id=thread_id,
+        anchor_message_id=anchor_message_id,
+        max_chars=max_chars,
+    )
+
+
+def build_thread_transcript_from_thread(
+    *,
+    thread: dict,
+    thread_id: str,
+    anchor_message_id: str,
+    max_chars: int,
+) -> str:
+    """Build a transcript from an already-fetched Gmail thread payload."""
+    if max_chars <= 0:
+        raise ValueError(f"max_chars must be > 0, got {max_chars}.")
+
     raw_messages = thread.get("messages", [])
-    filtered = [
-        msg
-        for msg in raw_messages
-        if "DRAFT" not in msg.get("labelIds", [])
-    ]
+    filtered = _non_draft_messages(raw_messages)
     logger.info(
         "Thread %s: fetched %d message(s), %d non-draft message(s) after filtering.",
         thread_id,
@@ -298,6 +357,14 @@ def build_thread_transcript(
     return transcript
 
 
+def _non_draft_messages(messages: list[dict]) -> list[dict]:
+    return [
+        msg
+        for msg in messages
+        if "DRAFT" not in msg.get("labelIds", [])
+    ]
+
+
 def _order_thread_messages(messages: list[dict]) -> list[dict]:
     """Order thread messages by timestamp, retaining undated rows.
 
@@ -324,6 +391,27 @@ def _internal_date_ms(message: dict) -> int | None:
         return int(str(raw))
     except (TypeError, ValueError):
         return None
+
+
+def staff_email_domains() -> set[str]:
+    """Return domains considered Wayonagio staff senders."""
+    raw = os.environ.get("STAFF_EMAIL_DOMAINS", "").strip()
+    values = raw.split(",") if raw else _DEFAULT_STAFF_EMAIL_DOMAINS
+    return {
+        value.strip().lower().removeprefix("@")
+        for value in values
+        if value.strip()
+    }
+
+
+def is_staff_sender(from_header: str, domains: set[str] | None = None) -> bool:
+    """Return whether *from_header* belongs to a configured staff domain."""
+    _, address = parseaddr(from_header or "")
+    if "@" not in address:
+        return False
+    domain = address.rsplit("@", 1)[1].lower()
+    staff_domains = domains if domains is not None else staff_email_domains()
+    return domain in staff_domains
 
 
 def get_messages_metadata(
