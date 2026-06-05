@@ -6,6 +6,8 @@ Endpoints:
                         "language": "it|es|en" (optional) }
       Requires Authorization: Bearer <AUTH_BEARER_TOKEN>
       Calls the manual draft flow and returns the created draft ID.
+  POST /generate-reply
+      Same request shape as /draft-reply, but returns generated body text only.
 
 Run with:
   uv run uvicorn wayonagio_email_agent.api:app --host 0.0.0.0
@@ -195,6 +197,12 @@ class DraftReplyResponse(BaseModel):
     message: str = "Draft created successfully."
 
 
+class GenerateReplyResponse(BaseModel):
+    body: str
+    anchor_message_id: str
+    message: str = "Reply generated successfully."
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
 
@@ -288,3 +296,73 @@ def draft_reply(body: DraftReplyRequest) -> DraftReplyResponse:
         )
 
     return DraftReplyResponse(draft_id=draft.get("id", ""))
+
+
+@app.post(
+    "/generate-reply",
+    response_model=GenerateReplyResponse,
+    dependencies=[Depends(_verify_token)],
+)
+def generate_reply(body: DraftReplyRequest) -> GenerateReplyResponse:
+    """Generate reply text without creating a Gmail draft.
+
+    The Gmail add-on uses this endpoint with CardService compose actions so
+    Gmail can create and open the draft in the currently active account.
+    """
+    logger.info(
+        "POST /generate-reply message_id=%s thread_id=%s language=%s",
+        body.message_id,
+        body.thread_id,
+        body.language,
+    )
+    try:
+        reply = agent.generate_manual_reply(
+            body.message_id,
+            forced_language=body.language,
+            thread_id=body.thread_id,
+        )
+    except SystemExit:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gmail authentication failed. Run `cli auth` on the server.",
+        )
+    except agent.NoCustomerReplyNeededError as exc:
+        logger.info(
+            "Reply generation skipped for %s/%s: %s",
+            body.thread_id,
+            body.message_id,
+            exc.detail,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.detail,
+        )
+    except (KBUnavailableError, KBConfigError) as exc:
+        logger.error(
+            "KB unavailable for %s: %s", body.message_id, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Knowledge base unavailable. Ask the operator to run kb-ingest.",
+        )
+    except EmptyReplyError as exc:
+        logger.error(
+            "LLM returned empty reply for %s: %s", body.message_id, exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM returned an empty reply. Please retry.",
+        )
+    except Exception as exc:
+        logger.error(
+            "Reply generation failed for %s: %s", body.message_id, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Reply generation failed. Check server logs.",
+        )
+
+    return GenerateReplyResponse(
+        body=reply.body,
+        anchor_message_id=reply.anchor_message_id,
+    )

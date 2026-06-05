@@ -61,7 +61,7 @@ src/wayonagio_email_agent/
   gmail_client.py     # Gmail + Drive API wrapper (OAuth2: gmail.readonly, gmail.compose, drive.readonly)
   llm/client.py       # LiteLLM-backed LLM client (generate_reply, is_travel_related, detect_language)
   agent.py            # Orchestration: manual draft flow + automatic scan loop
-  api.py              # FastAPI: POST /draft-reply (Bearer auth required)
+  api.py              # FastAPI: POST /draft-reply + /generate-reply (Bearer auth required)
   cli.py              # Admin CLI: list, draft-reply, scan, scan-once, kb-ingest, kb-search, kb-doctor, exemplar-list
   kb/                 # Required knowledge base (Drive-backed RAG grounding)
     config.py         # Env-driven config + Drive URL/ID parsing
@@ -82,12 +82,12 @@ src/wayonagio_email_agent/
     prompt.py         # Format the EXAMPLE RESPONSES block, KB-precedence framing
 addon/                # Google Workspace Add-on (Apps Script)
   appsscript.json
-  Code.gs             # Contextual trigger, language buttons → POST /draft-reply
+  Code.gs             # Contextual trigger, language buttons → POST /generate-reply + Gmail compose draft
 Dockerfile            # Cloud Run-ready container image
 ```
 
 **Data flow (manual trigger)**:
-Gmail Add-on → `POST /draft-reply` (HTTPS + Bearer) → `agent.py` → `gmail_client.py` (fetch message) + `llm/client.py` (generate reply via LiteLLM, grounded by `kb/retrieve.py` and optionally styled by `exemplars/loader.py`; KB failure aborts the draft, exemplar failure degrades silently) → `gmail_client.py` (create draft)
+Gmail Add-on → `POST /generate-reply` (HTTPS + Bearer) → `agent.py` → `gmail_client.py` (fetch message) + `llm/client.py` (generate reply via LiteLLM, grounded by `kb/retrieve.py` and optionally styled by `exemplars/loader.py`; KB failure aborts the draft, exemplar failure degrades silently) → Apps Script `GmailApp.getMessageById(anchor_message_id).createDraftReply` through a Gmail compose action (opens draft in the active Gmail account)
 
 **Data flow (automatic scanner)**:
 Scanner loop → list unread → `is_travel_related()` (simple yes/no prompt) → if yes, same draft flow as above
@@ -134,4 +134,4 @@ Defined in `.env` (never committed):
 
 ## Gmail Add-on (addon/)
 
-Apps Script project. Deployed as a Google Workspace Add-on with a contextual trigger on Gmail. The `Code.gs` file reads the current `message_id` from the Gmail context, stores the backend URL and Bearer token in Apps Script script properties, and calls `POST /draft-reply`. Document installation steps for the Workspace domain in the README.
+Apps Script project. Deployed as a Google Workspace Add-on with a contextual trigger on Gmail. The `Code.gs` file reads the current `message_id`/`thread_id` from the Gmail context, stores the backend URL and Bearer token in Apps Script script properties, calls `POST /generate-reply`, and returns a `ComposeActionResponse` using the backend-selected `anchor_message_id` so Gmail opens the draft in the active account against the same latest customer message. Document installation steps for the Workspace domain in the README.

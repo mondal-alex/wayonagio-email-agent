@@ -15,6 +15,7 @@ from wayonagio_email_agent.agent import (
     NoCustomerReplyNeededError,
     _build_references,
     _process_message,
+    generate_manual_reply,
     manual_draft_flow,
     scan_loop,
     scan_once,
@@ -77,6 +78,26 @@ class TestManualDraftFlow:
         _, kwargs = mock_draft.call_args
         assert kwargs["thread_id"] == "thread-001"
         assert kwargs["to"] == "guest@example.com"
+
+    def test_generate_manual_reply_does_not_create_draft(self):
+        with (
+            patch("wayonagio_email_agent.agent.gmail_client.get_message", return_value=_FAKE_MESSAGE),
+            patch("wayonagio_email_agent.agent.gmail_client.extract_message_parts", return_value=_FAKE_PARTS),
+            patch("wayonagio_email_agent.agent.llm.detect_language", return_value="it"),
+            patch("wayonagio_email_agent.agent.llm.generate_reply", return_value="Risposta di prova"),
+            patch("wayonagio_email_agent.agent.gmail_client.draft_reply") as mock_draft,
+        ):
+            reply = generate_manual_reply("msg-001")
+
+        assert reply.body == "Risposta di prova"
+        assert reply.thread_id == "thread-001"
+        assert reply.to == "guest@example.com"
+        assert reply.subject == "Tour inquiry"
+        assert reply.in_reply_to == "<msg-001@mail.example.com>"
+        assert reply.references == "<msg-001@mail.example.com>"
+        assert reply.anchor_message_id == "msg-001"
+        assert reply.language == "it"
+        mock_draft.assert_not_called()
 
     def test_passes_language_to_generate_reply(self):
         with (

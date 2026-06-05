@@ -280,6 +280,100 @@ class TestDraftReplyEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# POST /generate-reply
+# ---------------------------------------------------------------------------
+
+class TestGenerateReplyEndpoint:
+    def test_successful_generation_returns_body(self):
+        reply = agent.ManualReply(
+            body="Ciao, grazie per averci scritto.",
+            thread_id="thread-1",
+            to="guest@example.com",
+            subject="Tour inquiry",
+            in_reply_to="<msg@example.com>",
+            references="<msg@example.com>",
+            anchor_message_id="msg-1",
+            language="it",
+        )
+        with (
+            patch(
+                "wayonagio_email_agent.api.agent.generate_manual_reply",
+                return_value=reply,
+            ) as mock_generate,
+            patch("wayonagio_email_agent.api.agent.manual_draft_flow") as mock_draft,
+        ):
+            resp = client.post(
+                "/generate-reply",
+                json={
+                    "message_id": "msg-1",
+                    "thread_id": "thread-1",
+                    "language": "it",
+                },
+                headers=_GOOD_HEADERS,
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["body"] == "Ciao, grazie per averci scritto."
+        assert data["anchor_message_id"] == "msg-1"
+        assert "generated" in data["message"].lower()
+        mock_generate.assert_called_once_with(
+            "msg-1",
+            forced_language="it",
+            thread_id="thread-1",
+        )
+        mock_draft.assert_not_called()
+
+    def test_missing_message_id_returns_422(self):
+        resp = client.post("/generate-reply", json={}, headers=_GOOD_HEADERS)
+        assert resp.status_code == 422
+
+    def test_kb_unavailable_returns_503_with_actionable_message(self):
+        with patch(
+            "wayonagio_email_agent.api.agent.generate_manual_reply",
+            side_effect=KBUnavailableError("KB index artifact could not be downloaded."),
+        ):
+            resp = client.post(
+                "/generate-reply",
+                json={"message_id": "msg-kb"},
+                headers=_GOOD_HEADERS,
+            )
+        assert resp.status_code == 503
+        detail = resp.json()["detail"].lower()
+        assert "knowledge base" in detail
+        assert "kb-ingest" in detail
+
+    def test_thread_already_answered_returns_spanish_409(self):
+        with patch(
+            "wayonagio_email_agent.api.agent.generate_manual_reply",
+            side_effect=agent.NoCustomerReplyNeededError(),
+        ):
+            resp = client.post(
+                "/generate-reply",
+                json={"message_id": "msg-1", "thread_id": "thread-1"},
+                headers=_GOOD_HEADERS,
+            )
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "Wayonagio" in detail
+        assert "No se creo ningun borrador" in detail
+
+    def test_empty_reply_returns_502(self):
+        with patch(
+            "wayonagio_email_agent.api.agent.generate_manual_reply",
+            side_effect=EmptyReplyError("LLM returned an empty reply."),
+        ):
+            resp = client.post(
+                "/generate-reply",
+                json={"message_id": "msg-empty"},
+                headers=_GOOD_HEADERS,
+            )
+        assert resp.status_code == 502
+        assert "empty reply" in resp.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
 # /healthz
 # ---------------------------------------------------------------------------
 

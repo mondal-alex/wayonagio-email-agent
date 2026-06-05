@@ -2,7 +2,8 @@
  * Wayonagio Gmail Add-on
  *
  * Adds language-specific draft buttons when viewing an email in Gmail.
- * Clicking a button calls POST /draft-reply on the backend server.
+ * Clicking a button calls POST /generate-reply on the backend server, then
+ * opens the generated reply with Gmail's native compose UI.
  *
  * Setup (run once per deployment):
  *   1. Open this project in Apps Script editor.
@@ -35,26 +36,28 @@ function buildAddOn(e) {
 function buildDraftButtonsCard(messageId, threadId) {
   var italianButton = CardService.newTextButton()
     .setText("🇮🇹 Borrador en italiano")
-    .setOnClickAction(
+    .setComposeAction(
       CardService.newAction()
-        .setFunctionName("onDraftReply")
+        .setFunctionName("onGenerateReplyDraft")
         .setParameters({
           messageId: messageId,
           threadId: threadId,
           language: "it",
-        })
+        }),
+      CardService.ComposedEmailType.REPLY_AS_DRAFT
     );
 
   var spanishButton = CardService.newTextButton()
     .setText("🇵🇪 Borrador en espanol")
-    .setOnClickAction(
+    .setComposeAction(
       CardService.newAction()
-        .setFunctionName("onDraftReply")
+        .setFunctionName("onGenerateReplyDraft")
         .setParameters({
           messageId: messageId,
           threadId: threadId,
           language: "es",
-        })
+        }),
+      CardService.ComposedEmailType.REPLY_AS_DRAFT
     );
 
   var section = CardService.newCardSection()
@@ -64,97 +67,6 @@ function buildDraftButtonsCard(messageId, threadId) {
 
   return CardService.newCardBuilder()
     .setHeader(CardService.newCardHeader().setTitle("Borrador de respuesta"))
-    .addSection(section)
-    .build();
-}
-
-/**
- * Builds the success card shown after a draft is created. Provides a button
- * that opens the Gmail thread so the user can see the new draft without
- * manually refreshing or navigating to the Drafts folder.
- * @param {string} draftId
- * @param {string} threadId
- * @param {string} messageId
- * @returns {Card}
- */
-function buildSuccessCard(draftId, threadId, messageId) {
-  var baseUrl = "https://mail.google.com/mail";
-  var threadUrl = threadId
-    ? baseUrl + "/#all/" + encodeURIComponent(threadId)
-    : baseUrl + "/#drafts";
-
-  var openThreadButton = CardService.newTextButton()
-    .setText("Abrir hilo en una pestana nueva")
-    .setOpenLink(
-      CardService.newOpenLink()
-        .setUrl(threadUrl)
-        .setOpenAs(CardService.OpenAs.FULL_SIZE)
-        .setOnClose(CardService.OnClose.NOTHING)
-    );
-
-  var backButton = CardService.newTextButton()
-    .setText("Volver a los botones")
-    .setOnClickAction(
-      CardService.newAction()
-        .setFunctionName("onBackToButtons")
-        .setParameters({ messageId: messageId, threadId: threadId })
-    );
-
-  var section = CardService.newCardSection()
-    .setHeader("Borrador creado")
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "Tu borrador esta listo en este hilo. Haz clic abajo para abrirlo."
-      )
-    )
-    .addWidget(openThreadButton)
-    .addWidget(backButton)
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "<font color=\"#888888\">ID de borrador: " + draftId + "</font>"
-      )
-    );
-
-  return CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle("Wayonagio"))
-    .addSection(section)
-    .build();
-}
-
-/**
- * Builds a persistent error card so backend errors remain visible after the
- * notification toast disappears.
- * @param {string} message
- * @param {number} code
- * @param {string} messageId
- * @param {string} threadId
- * @returns {Card}
- */
-function buildErrorCard(message, code, messageId, threadId) {
-  var backButton = CardService.newTextButton()
-    .setText("Volver a los botones")
-    .setOnClickAction(
-      CardService.newAction()
-        .setFunctionName("onBackToButtons")
-        .setParameters({ messageId: messageId, threadId: threadId })
-    );
-
-  var section = CardService.newCardSection()
-    .setHeader("No se creo el borrador")
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        escapeHtml(message || "No se pudo crear el borrador.")
-      )
-    )
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "<font color=\"#888888\">Codigo: " + code + "</font>"
-      )
-    )
-    .addWidget(backButton);
-
-  return CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle("Wayonagio"))
     .addSection(section)
     .build();
 }
@@ -177,27 +89,12 @@ function parseErrorMessage(text) {
 }
 
 /**
- * Escape user-visible text before rendering in a TextParagraph.
- * @param {string} text
- * @returns {string}
- */
-function escapeHtml(text) {
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/**
- * Called when the user clicks a "Draft in <language>" button.
- * POSTs to the backend, then swaps the card for a success card with a button
- * that opens the Gmail thread.
+ * Called when the user clicks a language button. POSTs to the backend for
+ * generated text, then returns a Gmail draft that Gmail opens in compose UI.
  * @param {Object} e - Action event with parameters.messageId, threadId, language.
- * @returns {ActionResponse}
+ * @returns {ComposeActionResponse}
  */
-function onDraftReply(e) {
+function onGenerateReplyDraft(e) {
   var messageId = (e.gmail && e.gmail.messageId) || e.parameters.messageId;
   var threadId = (e.gmail && e.gmail.threadId) || e.parameters.threadId;
   var language = e.parameters.language;
@@ -206,16 +103,16 @@ function onDraftReply(e) {
   var bearerToken = (props.getProperty("BEARER_TOKEN") || "").trim();
 
   if (!backendUrl || !bearerToken) {
-    return CardService.newActionResponseBuilder()
-      .setNotification(
-        CardService.newNotification().setText(
-          "Complemento no configurado. Define BACKEND_URL y BEARER_TOKEN en Propiedades del script."
-        )
-      )
-      .build();
+    throw new Error(
+      "Complemento no configurado. Define BACKEND_URL y BEARER_TOKEN en Propiedades del script."
+    );
   }
 
-  var url = backendUrl.replace(/\/$/, "") + "/draft-reply";
+  if (!e.gmail || !e.gmail.accessToken) {
+    throw new Error("No se pudo autorizar Gmail para crear el borrador.");
+  }
+
+  var url = backendUrl.replace(/\/$/, "") + "/generate-reply";
 
   var options = {
     method: "post",
@@ -235,46 +132,29 @@ function onDraftReply(e) {
 
     if (code === 200) {
       var body = JSON.parse(response.getContentText());
-      var successCard = buildSuccessCard(body.draft_id, threadId, messageId);
+      var replyBody = body.body;
+      var anchorMessageId = body.anchor_message_id;
 
-      return CardService.newActionResponseBuilder()
-        .setNotification(
-          CardService.newNotification().setText("Borrador creado")
-        )
-        .setNavigation(CardService.newNavigation().updateCard(successCard))
+      if (!replyBody) {
+        throw new Error("El servidor no devolvio texto para el borrador.");
+      }
+      if (!anchorMessageId) {
+        throw new Error("El servidor no devolvio el mensaje ancla para el borrador.");
+      }
+
+      GmailApp.setCurrentMessageAccessToken(e.gmail.accessToken);
+      var draft = GmailApp.getMessageById(anchorMessageId).createDraftReply(replyBody);
+
+      return CardService.newComposeActionResponseBuilder()
+        .setGmailDraft(draft)
         .build();
     } else {
       var errorText = parseErrorMessage(response.getContentText());
-      var errorCard = buildErrorCard(errorText, code, messageId, threadId);
       Logger.log("Backend error " + code + ": " + errorText);
-      return CardService.newActionResponseBuilder()
-        .setNotification(
-          CardService.newNotification().setText(errorText)
-        )
-        .setNavigation(CardService.newNavigation().updateCard(errorCard))
-        .build();
+      throw new Error(errorText);
     }
   } catch (err) {
     Logger.log("Request failed: " + err);
-    return CardService.newActionResponseBuilder()
-      .setNotification(
-        CardService.newNotification().setText("La solicitud fallo: " + err)
-      )
-      .build();
+    throw err;
   }
-}
-
-/**
- * Called from the success card's "Back to draft buttons" button.
- * Restores the initial card for the same message/thread.
- * @param {Object} e - Action event with parameters.messageId and threadId.
- * @returns {ActionResponse}
- */
-function onBackToButtons(e) {
-  var messageId = e.parameters.messageId;
-  var threadId = e.parameters.threadId;
-  var card = buildDraftButtonsCard(messageId, threadId);
-  return CardService.newActionResponseBuilder()
-    .setNavigation(CardService.newNavigation().updateCard(card))
-    .build();
 }

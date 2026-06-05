@@ -44,7 +44,7 @@ of these three boundaries:
 
 Three entry points sit on top:
 
-- **`api.py`** — `POST /draft-reply` for the Gmail Add-on (synchronous, low-volume).
+- **`api.py`** — `POST /generate-reply` for the Gmail Add-on and `POST /draft-reply` for server-created drafts (synchronous, low-volume).
 - **`cli.py`** — admin commands (`auth`, `list`, `draft-reply`, `scan`, `scan-once`, `kb-ingest`, `kb-search`, `kb-doctor`, `exemplar-list`).
 - **`agent.py`** — orchestration shared by both: `manual_draft_flow`, `scan_once`, `scan_loop`.
 
@@ -63,16 +63,16 @@ on an open Gmail thread.
 ```
 Gmail Add-on (Apps Script)
     │
-    │  POST /draft-reply  { message_id, language? }
+    │  POST /generate-reply  { message_id, thread_id, language? }
     │  Authorization: Bearer <AUTH_BEARER_TOKEN>
     ▼
 api._verify_token  ─── HMAC-compare bearer (constant time) ───▶ 401 on mismatch
     │
     ▼
-api.draft_reply  (sync def — runs in FastAPI threadpool, see §5.3)
+api.generate_reply  (sync def — runs in FastAPI threadpool, see §5.3)
     │
     ▼
-agent.manual_draft_flow(message_id, forced_language)
+agent.generate_manual_reply(message_id, forced_language, thread_id)
     │
     ├──▶ gmail_client.get_message(message_id)        ── Gmail API
     ├──▶ gmail_client.extract_message_parts(...)     ── parse MIME tree
@@ -85,7 +85,16 @@ agent.manual_draft_flow(message_id, forced_language)
     │       └──▶ exemplars.prompt.format_exemplar_block  ── append AFTER reference block
     │       └──▶ litellm.completion(...)             ── LLM call
     │       └──▶ EmptyReplyError if blank
-    └──▶ gmail_client.draft_reply(...)               ── drafts.create ONLY
+    └──▶ returns generated reply body + anchor_message_id
+    │
+    ▼
+Apps Script GmailApp.getMessageById(anchor_message_id).createDraftReply(...)
+                                                    ── native compose draft in active account
+```
+
+`cli draft-reply` and direct `POST /draft-reply` clients call
+`agent.manual_draft_flow`, which wraps the same `generate_manual_reply`
+logic and then calls `gmail_client.draft_reply(...)` (`drafts.create` ONLY).
 ```
 
 **Prompt block ordering is load-bearing.** The exemplar block's framing
@@ -284,8 +293,11 @@ Routes:
 
 - `GET /healthz` — unauthenticated liveness probe. Does **not** call Gmail
   or the LLM — Cloud Run health checks must not depend on external services.
+- `POST /generate-reply` — bearer-protected; thin wrapper around
+  `agent.generate_manual_reply`, used by the Gmail Add-on compose action.
 - `POST /draft-reply` — bearer-protected; thin wrapper around
-  `agent.manual_draft_flow` with the error mapping shown in §2.1.
+  `agent.manual_draft_flow`, used by CLI/direct API clients that still need
+  the server to create the draft.
 
 **Critical detail:** `draft_reply` is a **sync `def`**, not `async def`.
 `manual_draft_flow` does multi-second blocking I/O (Gmail HTTPS, LLM
@@ -424,9 +436,11 @@ sensitive substring survives in the cached `Exemplar.text`.
 ### `addon/`
 
 Apps Script project for the Gmail Add-on. Reads `BACKEND_URL` and
-`BEARER_TOKEN` from script properties, calls `POST /draft-reply` from
-`UrlFetchApp`, and shows a notification card with the result. No business
-logic; deliberately thin.
+`BEARER_TOKEN` from script properties, calls `POST /generate-reply` from
+`UrlFetchApp`, and returns a `ComposeActionResponse` with a Gmail draft
+created from the backend-selected `anchor_message_id` so the editable reply
+opens against the exact latest customer message. No business logic;
+deliberately thin.
 
 ---
 
@@ -443,10 +457,10 @@ These are tested in CI and treated as load-bearing:
    code path. Enforced by `tests/test_llm.py::TestGenerateReply` and
    surfaced as a 503 in the API.
 
-3. **Bearer-token auth on every mutating endpoint.** `POST /draft-reply`
-   requires it; `_verify_token` uses `hmac.compare_digest` (constant time);
-   `/healthz` is the only unauthenticated endpoint and it cannot mutate
-   anything.
+3. **Bearer-token auth on every mutating endpoint.** `POST /generate-reply`
+   and `POST /draft-reply` require it; `_verify_token` uses
+   `hmac.compare_digest` (constant time); `/healthz` is the only
+   unauthenticated endpoint and it cannot mutate anything.
 
 4. **HTTPS-only in production.** Cloud Run terminates TLS automatically;
    self-hosted runs behind Caddy/Nginx. HSTS is set on every response, so

@@ -22,6 +22,7 @@ are isolated so one bad email never stops the batch.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import os
 import time
@@ -45,6 +46,20 @@ class NoCustomerReplyNeededError(RuntimeError):
     def __init__(self, detail: str = _NO_CUSTOMER_REPLY_NEEDED_DETAIL) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+@dataclass(frozen=True)
+class ManualReply:
+    """Generated reply plus the Gmail metadata needed to create a draft."""
+
+    body: str
+    thread_id: str
+    to: str
+    subject: str
+    in_reply_to: str
+    references: str
+    anchor_message_id: str
+    language: str
 
 
 def scanner_enabled() -> bool:
@@ -77,20 +92,18 @@ def _thread_max_chars() -> int:
     return value
 
 
-def manual_draft_flow(
+def generate_manual_reply(
     message_id: str,
     forced_language: str | None = None,
     thread_id: str | None = None,
-) -> dict:
-    """Create a draft reply for *message_id*.
+) -> ManualReply:
+    """Generate a reply for the latest customer message in a Gmail thread.
 
-    Used by both the API (Add-on trigger) and the CLI `draft-reply` command.
-    No travel classification — caller has already chosen the Gmail thread.
-
-    Returns the Gmail draft resource dict.
+    This is the side-effect-free half of ``manual_draft_flow``: it reads Gmail
+    context and calls the LLM, but it does not create a Gmail draft.
     """
     logger.info(
-        "Starting manual draft flow for requested message %s (thread_id=%s).",
+        "Starting manual reply generation for requested message %s (thread_id=%s).",
         message_id,
         thread_id,
     )
@@ -108,7 +121,7 @@ def manual_draft_flow(
     anchor, thread = gmail_client.resolve_latest_thread_anchor(resolved_thread_id)
     if anchor.is_staff:
         logger.info(
-            "Manual draft skipped: latest non-draft message is staff "
+            "Manual reply skipped: latest non-draft message is staff "
             "(requested_message=%s, thread=%s, anchor=%s).",
             message_id,
             resolved_thread_id,
@@ -125,7 +138,7 @@ def manual_draft_flow(
         max_chars=_thread_max_chars(),
     )
     logger.info(
-        "Manual draft anchor resolved (requested_message=%s, thread=%s, anchor=%s).",
+        "Manual reply anchor resolved (requested_message=%s, thread=%s, anchor=%s).",
         message_id,
         resolved_thread_id,
         anchor_id,
@@ -146,18 +159,53 @@ def manual_draft_flow(
         latest_customer_turn=parts["body"] or parts["subject"],
     )
 
-    draft = gmail_client.draft_reply(
+    return ManualReply(
+        body=reply_body,
         thread_id=resolved_thread_id,
         to=parts["from_"],
         subject=parts["subject"],
-        body=reply_body,
         in_reply_to=parts["message_id_header"],
         references=_build_references(parts["references"], parts["message_id_header"]),
+        anchor_message_id=anchor_id,
+        language=language,
+    )
+
+
+def manual_draft_flow(
+    message_id: str,
+    forced_language: str | None = None,
+    thread_id: str | None = None,
+) -> dict:
+    """Create a draft reply for *message_id*.
+
+    Used by both the API (Add-on trigger) and the CLI `draft-reply` command.
+    No travel classification — caller has already chosen the Gmail thread.
+
+    Returns the Gmail draft resource dict.
+    """
+    logger.info(
+        "Starting manual draft flow for requested message %s (thread_id=%s).",
+        message_id,
+        thread_id,
+    )
+
+    reply = generate_manual_reply(
+        message_id,
+        forced_language=forced_language,
+        thread_id=thread_id,
+    )
+    draft = gmail_client.draft_reply(
+        thread_id=reply.thread_id,
+        to=reply.to,
+        subject=reply.subject,
+        body=reply.body,
+        in_reply_to=reply.in_reply_to,
+        references=reply.references,
     )
     logger.info(
         "Draft created successfully for requested message %s (anchor=%s).",
         message_id,
-        anchor_id,
+        reply.anchor_message_id,
     )
     return draft
 

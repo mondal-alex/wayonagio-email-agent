@@ -150,7 +150,7 @@ This service is simple by design. The security posture below is what keeps it tr
 
 **Authentication and transport**
 
-- Every `POST /draft-reply` request must carry `Authorization: Bearer <AUTH_BEARER_TOKEN>`.
+- Every protected API request (`POST /generate-reply`, `POST /draft-reply`) must carry `Authorization: Bearer <AUTH_BEARER_TOKEN>`.
 - The token is compared with `hmac.compare_digest`, so byte-level timing leaks aren't possible.
 - HTTPS/TLS is non-negotiable. Cloud Run terminates TLS automatically. Self-hosted must run behind Caddy or Nginx — never expose the uvicorn port directly.
 - HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer` are added to every response.
@@ -254,7 +254,7 @@ Scanner behavior:
 
 **Recommended Cloud Run pattern**
 
-Cloud Run's API service is for the Gmail Add-on's synchronous `POST /draft-reply` traffic. The scanner doesn't fit that model — so run it as a **Cloud Run Job** triggered by **Cloud Scheduler** on a fixed cron (e.g. every 30 minutes). The Job container entrypoint is simply:
+Cloud Run's API service is for the Gmail Add-on's synchronous `POST /generate-reply` traffic and direct `POST /draft-reply` calls. The scanner doesn't fit that model — so run it as a **Cloud Run Job** triggered by **Cloud Scheduler** on a fixed cron (e.g. every 30 minutes). The Job container entrypoint is simply:
 
 ```
 python -m wayonagio_email_agent.cli scan-once
@@ -372,11 +372,11 @@ The Add-on lives in `addon/`. It adds **two language-specific draft buttons** in
 3. In the Apps Script editor, go to **Project Settings → Script Properties** and add:
   - `BACKEND_URL` — your server URL, e.g. `https://your-server.example.com`
   - `BEARER_TOKEN` — the same value as `AUTH_BEARER_TOKEN` in your `.env`
-4. **Allowlists in `appsscript.json` (required to deploy).** Google Workspace add-ons that call `UrlFetchApp` must declare `urlFetchWhitelist` with an **HTTPS URL prefix** for each host you call (trailing path required, e.g. `https://example.com/`). The template includes `https://*.a.run.app/` for **Cloud Run** (`BACKEND_URL` on `*.a.run.app`). If you use a **custom domain** (or `ngrok`, etc.) instead, add another prefix to `urlFetchWhitelist` for that host, save the manifest, then deploy. The manifest also allowlists `https://mail.google.com/` for the **Open thread** link on the success card.
+4. **Allowlists in `appsscript.json` (required to deploy).** Google Workspace add-ons that call `UrlFetchApp` must declare `urlFetchWhitelist` with an **HTTPS URL prefix** for each host you call (trailing path required, e.g. `https://example.com/`). The template includes `https://*.a.run.app/` for **Cloud Run** (`BACKEND_URL` on `*.a.run.app`). If you use a **custom domain** (or `ngrok`, etc.) instead, add another prefix to `urlFetchWhitelist` for that host, save the manifest, then deploy.
 5. Click **Deploy → New Deployment** → type **Google Workspace Add-on**.
 6. Install the Add-on for your Workspace domain via the Admin console, or install it for yourself via the deployment URL.
 
-When a staff member opens an email in Gmail, the Add-on panel appears on the right. Clicking one of the language buttons calls `POST /draft-reply` on the backend with `message_id` and `language` (`it` or `es`), and a draft appears in the Gmail thread.
+When a staff member opens an email in Gmail, the Add-on panel appears on the right. Clicking one of the language buttons calls `POST /generate-reply` on the backend with `message_id`, `thread_id`, and `language` (`it` or `es`). The backend returns generated reply text plus the exact latest-customer anchor message ID; the Add-on then uses Gmail's native compose action to open an editable reply draft against that message in the current Gmail account.
 
 ## Recommended deployment: Cloud Run + Gemini
 
@@ -746,7 +746,7 @@ gcloud run services describe wayonagio-email-agent \
   --format='yaml(status.latestReadyRevisionName,spec.template.spec.containers[0].env,status.url)'
 
 gcloud logging read \
-  'resource.type="cloud_run_revision" AND resource.labels.service_name="wayonagio-email-agent" AND (textPayload:"OAuth token refresh failed" OR textPayload:"invalid_grant" OR textPayload:"Authentication successful" OR textPayload:"POST /draft-reply")' \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="wayonagio-email-agent" AND (textPayload:"OAuth token refresh failed" OR textPayload:"invalid_grant" OR textPayload:"Authentication successful" OR textPayload:"POST /generate-reply" OR textPayload:"POST /draft-reply")' \
   --project="$PROJECT_ID" \
   --limit=50 \
   --order=desc \
@@ -755,7 +755,7 @@ gcloud logging read \
 
 Healthy signals:
 - `GMAIL_TOKEN_PATH` points to `/secrets/gmail-token/token.json`.
-- You see recent `POST /draft-reply` lines.
+- You see recent `POST /generate-reply` lines from the Gmail Add-on, or `POST /draft-reply` lines from direct server-created draft calls.
 - You do **not** see fresh `invalid_grant` / `OAuth token refresh failed` after your latest deploy.
 
 ### Optional automation scripts
@@ -905,7 +905,7 @@ src/wayonagio_email_agent/
   gmail_client.py     # Gmail + Drive API: OAuth, list/get/draft/dedup
   llm/client.py       # LiteLLM-backed LLM: detect_language, generate_reply, is_travel_related
   agent.py            # Orchestration: manual flow + scanner loop
-  api.py              # FastAPI: POST /draft-reply
+  api.py              # FastAPI: POST /generate-reply, POST /draft-reply
   cli.py              # CLI: auth, list, draft-reply, scan, scan-once, kb-ingest, kb-search, kb-doctor, exemplar-list
   state.py            # SQLite dedup state for scanner
   kb/                 # Knowledge base (required, KB_RAG_FOLDER_IDS)
